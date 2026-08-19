@@ -135,14 +135,21 @@ single hard example.
 
 ## Running a scan end-to-end
 ```python
+import torch
+
+from models.behavioral_cnn import CortexBehavioralNet, SEQUENCE_LENGTH
 from models.static_lgbm import LGBMModel
 from tokenizer.api_tokenizer import ApiTokenizer
 from inference.pipeline import CortexPipeline
-import torch
 
 static_model = LGBMModel.load("data/models/cortex_static")
-behavioral_model = torch.load("data/models/cortex_behavioral_full.pt")  # or reconstruct + load_state_dict
+
 tokenizer = ApiTokenizer.load("data/models/api_vocab.json")
+# checkpoint is a raw state_dict (see scripts/train_behavioral.py), not a
+# pickled full model -- construct the architecture first, then load into it.
+behavioral_model = CortexBehavioralNet(vocab_size=tokenizer.vocab_size, sequence_length=SEQUENCE_LENGTH, embed_dim=128)
+behavioral_model.load_state_dict(torch.load("data/models/cortex_behavioral_best.pt", map_location="cpu"))
+behavioral_model.eval()
 
 pipeline = CortexPipeline(static_model, behavioral_model, tokenizer)
 result = pipeline.scan(r"C:\Samples\application.exe", api_calls_json_path=r"C:\Telemetry\api_calls.json")
