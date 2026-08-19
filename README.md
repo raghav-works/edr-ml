@@ -93,16 +93,36 @@ benchmark_latency("data/models/cortex_behavioral_int8.onnx")
 
 ## Thresholds
 Hard-coded in `inference/policy_engine.py` (mirrored in
-`config/thresholds.yaml`) exactly as given:
-- static score `< 0.6634794478` → ALLOW, `< 0.9882189978` → ALERT, else BLOCK
-- behavioral score `>= 0.9910649657` → MALICIOUS, else BENIGN
+`config/thresholds.yaml`), re-derived against the models actually trained in
+this repo (not carried over from the prior project's placeholder values):
+- static score `< 0.6163460957` → ALLOW, `< 0.9950119117` → ALERT, else BLOCK
+  (`models.static_lgbm.find_threshold_for_fpr()` against `cortex_static`'s
+  calibrated test-set probabilities; BLOCK hits the architecture doc's
+  max_fpr@0.1% bar, ALLOW uses target_fpr=0.01 -- see the code comments in
+  `policy_engine.py`/`thresholds.yaml` for the full derivation).
+- behavioral score `>= 0.60` → MALICIOUS, else BENIGN (a threshold sweep
+  against `cortex_behavioral_best.pt`'s val+test scores, not a precise FPR
+  target -- 274 benign samples can't support one. See the known-limitation
+  note below.)
 
-These were supplied as-is from the prior project; they were presumably
-calibrated against a specific validation set to hit target FPR/detection
-rate. If you retrain from scratch, your raw score distribution will differ,
-so re-derive them with `models.static_lgbm.find_threshold_for_fpr()` against
-your own held-out set rather than assuming these exact numbers still hit the
-same FPR/detection-rate targets.
+If you retrain either model from scratch, the raw score distribution will
+differ and these need to be re-derived again, not assumed to still hold.
+
+**Known limitation (behavioral threshold):** across the full val+test sweep,
+exactly one benign sample is misclassified at every threshold below ~0.922 --
+a MalbehavD-V1 sample whose trace includes networking-setup calls
+(`setsockopt`, `ioctlsocket`, `wsastartup`, `getsockname`) alongside routine
+registry/system calls, plausibly confusable with C2 setup. The model scores
+it 0.921006, confidently wrong, not a wobbly near-threshold case. We
+deliberately kept the threshold at 0.60 rather than raising it past 0.922 to
+clear this one case: n=1 evidence isn't a sound basis for a permanent recall
+tradeoff across the whole malicious population, especially since behavioral
+has no downstream backstop in this repo yet (no rule-based overlay for
+high-risk call combinations independent of the ML score). The more targeted
+fix is either more real benign network-adjacent software traces in future
+training data, or the architecture research's rule-based overlay for
+high-risk call combinations -- not blanket threshold tuning in response to a
+single hard example.
 
 ## Running a scan end-to-end
 ```python

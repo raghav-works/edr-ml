@@ -38,6 +38,9 @@ def export_behavioral_to_onnx(model: torch.nn.Module, output_path: str, sequence
         input_names=["api_token_ids"], output_names=["malicious_logit"],
         dynamic_axes={"api_token_ids": {0: "batch"}, "malicious_logit": {0: "batch"}},
         opset_version=opset,
+        dynamo=False,  # torch's newer dynamo-based exporter needs onnxscript,
+                        # which isn't a project dependency; the legacy
+                        # TorchScript-based exporter covers this model fine.
     )
     logger.info("Behavioral model exported to %s (%.2f MB)", output_path,
                 Path(output_path).stat().st_size / 1e6)

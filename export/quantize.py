@@ -32,7 +32,18 @@ class ComparisonReport:
 
 def quantize_behavioral_int8(fp32_path: str, int8_path: str) -> None:
     Path(int8_path).parent.mkdir(parents=True, exist_ok=True)
-    quantize_dynamic(model_input=fp32_path, model_output=int8_path, weight_type=QuantType.QInt8)
+    # op_types_to_quantize is restricted to MatMul/Gemm (the attention
+    # projections and the classifier head). Conv is deliberately excluded:
+    # ONNX Runtime's CPU execution provider has no ConvInteger kernel for
+    # this opset/version, so dynamic-quantizing the Conv1d stack fails at
+    # session-creation time with a NOT_IMPLEMENTED error, not a runtime
+    # accuracy issue -- the model literally can't load. Quantizing the
+    # Conv1d stack would need static/QDQ quantization with calibration
+    # data instead of dynamic quantization; out of scope here.
+    quantize_dynamic(
+        model_input=fp32_path, model_output=int8_path, weight_type=QuantType.QInt8,
+        op_types_to_quantize=["MatMul", "Gemm"],
+    )
     fp32_mb = Path(fp32_path).stat().st_size / 1e6
     int8_mb = Path(int8_path).stat().st_size / 1e6
     logger.info("Quantized %s (%.2f MB) -> %s (%.2f MB, %.1f%% reduction)",

@@ -28,7 +28,35 @@ from typing import Optional
 # meaningfully separating from ALERT.
 STATIC_ALLOW_MAX = 0.6163460957      # score <  this -> ALLOW
 STATIC_BLOCK_MIN = 0.9950119117      # score >= this -> BLOCK   (between the two -> ALERT)
-BEHAVIORAL_MALICIOUS_MIN = 0.9910649657  # score >= this -> MALICIOUS, else BENIGN (behavioral model not yet trained -- placeholder, unchanged)
+
+# Behavioral threshold re-derived against data/models/cortex_behavioral_best.pt
+# (1D-CNN+attention, trained on the deduplicated Mal-API-2019+MalbehavD-V1+
+# Carpenter behavioral dataset) via a threshold sweep (0.10-0.99) on the
+# val+test splits combined (1,835 rows, 274 benign) for more statistical
+# power than test alone (137 benign). NOT derived via find_threshold_for_fpr()
+# at a precise target like static's 0.1%/1% -- 274 benign samples (~0.36%
+# resolution per sample) can't support a precise-sounding FPR claim.
+#
+# 0.60 rather than the higher end of the zero-observed-FP range (~0.922+):
+# there is exactly one persistent false positive across the whole sweep, a
+# MalbehavD-V1 benign sample whose trace includes networking-setup calls
+# (setsockopt, ioctlsocket, wsastartup, getsockname) alongside routine
+# registry/system calls -- plausibly confusable with C2 setup, and the model
+# is confidently wrong about it (scores 0.921006, not a wobbly near-threshold
+# case). Below its exact score, ANY threshold produces this one false
+# positive; from ~0.922 up, false positives disappear on the data we have.
+# 0.60 deliberately does NOT clear that single case. Malicious recall climbs
+# steadily as the threshold drops (FN count on val+test: 57 at 0.95, 49 at
+# 0.90, ~38 at 0.60, 36 at 0.50), and n=1 evidence isn't a sound basis for a
+# permanent recall tradeoff across the whole malicious population --
+# especially since behavioral currently has no downstream backstop in this
+# repo (no rule-based overlay for high-risk call combinations independent of
+# the ML score). If/when more real benign network-adjacent software traces
+# are added to training data, or the architecture research's rule-based
+# overlay for high-risk call combinations gets built, that's the more
+# targeted fix for this class of ambiguity -- not blanket threshold tuning
+# in response to a single hard example.
+BEHAVIORAL_MALICIOUS_MIN = 0.60      # score >= this -> MALICIOUS, else BENIGN
 
 
 class StaticVerdict(str, enum.Enum):
