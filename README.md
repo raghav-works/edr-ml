@@ -82,7 +82,16 @@ python -m scripts.train_behavioral \
 from export.export_onnx import export_static_lgbm_to_onnx, export_behavioral_to_onnx
 from export.quantize import quantize_behavioral_int8, compare_accuracy, benchmark_latency
 
-export_static_lgbm_to_onnx("data/models/cortex_static.lgbm", "data/models/cortex_static.onnx")
+# Takes the base model path (LGBMModel.save()'s <path>.lgbm + <path>.meta),
+# not a bare .lgbm path -- the calibrator lives in the .meta file and gets
+# chained into the ONNX graph itself (see the export_static_lgbm_to_onnx
+# docstring): the exported model's one output IS the Platt-calibrated
+# probability, matching LGBMModel.predict_proba() exactly. Exporting just
+# the raw booster would silently diverge from the calibrated distribution
+# the thresholds above were derived against (raw vs. calibrated differ by
+# up to ~0.21 on real test data -- the raw booster saturates hard at
+# 0.0/1.0 for many samples).
+export_static_lgbm_to_onnx("data/models/cortex_static", "data/models/cortex_static.onnx")
 # static model: NO INT8 quantization (tree ensemble — no effect on split thresholds)
 
 export_behavioral_to_onnx(model, "data/models/cortex_behavioral.onnx")
