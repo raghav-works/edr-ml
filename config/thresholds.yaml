@@ -1,0 +1,30 @@
+# Decision thresholds — must match inference/policy_engine.py constants.
+#
+# static.*: re-derived against data/models/cortex_static (LightGBM trained
+# on the deduplicated EMBER2024 PE-format train split, 2.34M rows) via
+# models.static_lgbm.find_threshold_for_fpr() on the calibrated
+# probabilities from the deduplicated EMBER2024 test split (539,940 rows).
+# block_at_or_above hits the architecture doc's max_fpr@0.1% = 0.001 bar
+# (target_fpr=0.001 -> actual FPR=0.000997, detection_rate=0.9168).
+# allow_below uses target_fpr=0.01 (actual FPR=0.009999, detection_rate=
+# 0.9803) -- the score distribution has a cliff between target_fpr 0.005
+# and 0.01 (threshold drops from ~0.96 to ~0.62), so 0.01 is where ALLOW
+# stops sitting in near-BLOCK territory and starts meaningfully separating
+# from ALERT.
+#
+# behavioral.*: still the prior project's placeholder -- the behavioral
+# model hasn't been trained yet, so there's no validation set to re-derive
+# this against. Re-derive the same way once it exists.
+
+static:
+  allow_below: 0.6163460957      # score <  this -> ALLOW
+  block_at_or_above: 0.9950119117  # score >= this -> BLOCK (else ALERT)
+
+behavioral:
+  malicious_at_or_above: 0.9910649657  # score >= this -> MALICIOUS, else BENIGN (placeholder, unchanged)
+
+sequence:
+  max_api_calls: 100
+
+file:
+  max_size_bytes: 104857600  # 100 MiB

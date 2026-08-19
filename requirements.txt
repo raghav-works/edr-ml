@@ -1,0 +1,23 @@
+# Core
+numpy>=1.26
+pandas>=2.2
+scikit-learn>=1.4
+pyyaml>=6.0
+
+# Static model
+lightgbm>=4.3
+pefile>=2023.2.7
+signify>=0.6.0   # optional, Authenticode parsing — degrades gracefully if missing
+
+# Behavioral model
+torch>=2.2
+
+# Dataset
+datasets>=2.19   # HuggingFace, for joyce8/EMBER2024
+pyarrow>=15.0    # parquet I/O
+
+# Export / quantization
+onnx>=1.16
+onnxruntime>=1.17
+onnxmltools>=1.12
+skl2onnx>=1.16

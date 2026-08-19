@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+
+# Virtualenv
+.venv/
+
+# Generated data and model artifacts (data/download_ember2024.py and
+# data/__init__.py are real source and stay tracked; only the generated
+# subdirectories under data/ are ignored here)
+data/processed/
+data/models/
+
+# Large/generated file types, as a safety net wherever they end up
+*.parquet
+*.lgbm
+*.meta
+*.pt
+*.onnx
