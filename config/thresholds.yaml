@@ -38,6 +38,43 @@
 # overlay for high-risk call combinations gets built, that's the more
 # targeted fix for this class of ambiguity -- not blanket threshold tuning
 # in response to a single hard example.
+#
+# memory.*: re-derived against data/models/cortex_memory (LightGBM +
+# Platt calibration, trained on scripts/split_memory.py's group-aware
+# CIC-MalMem-2022 split) via models.memory_lgbm.find_threshold_for_fpr() at
+# target_fpr=0.01 on the calibrated val+test-combined probabilities (11,860
+# rows, 5,860 benign -- healthy enough to support a precise FPR target,
+# unlike behavioral's 274). Test-set metrics at this threshold: AUC-ROC=1.0,
+# precision=0.9891, recall=1.0, F1=0.9945, FPR=1.13%. These numbers are
+# internally valid on CIC-MalMem-2022 but likely optimistic for production:
+# 22 of the model's 62 features individually exceed 0.95 AUC on their own
+# (confirmed on held-out test), consistent with CIC-MalMem-2022's own
+# documented single-VM benign collection methodology (every benign sample
+# is a repeated capture of one baseline Windows 10 VM) rather than proof of
+# real injected-process detection. Full sweep table and evidence in the
+# README's "Training results and the separability finding" section.
+# malicious_at_or_above is used only to compute MemoryVerdict -- unlike
+# static/behavioral, that verdict is policy-capped at ALERT regardless of
+# score (inference/policy_engine.py::decide()), never BLOCK/TERMINATE,
+# pending real-world validation beyond this single-VM-benign dataset.
+#
+# network.*: re-derived against data/models/cortex_network (LightGBM +
+# Platt calibration, trained on scripts/split_network.py's leakage-checked,
+# ambiguous-group-excluded CSE-CIC-IDS2018 split) via target_fpr=0.001 on
+# the calibrated val+test-combined probabilities (424,914 rows, 321,733
+# benign -- far more statistical power than memory's or behavioral's).
+# Test-set metrics: AUC-ROC=0.9972, precision=0.9969, recall=0.9752,
+# F1=0.9859, FPR=0.098%. Like memory, malicious_at_or_above is policy-capped
+# at ALERT, never BLOCK/TERMINATE -- but for two independent, evidence-
+# backed reasons: (a) Infiltration detection is only 10.75% on held-out
+# test, a documented CICFlowMeter-feature-representation ceiling (not an
+# under-training artifact -- 11,463 train rows), so Network structurally
+# can't be trusted alone for slow/low-volume attacks; (b) models reported
+# "nearly perfect" on CSE-CIC-IDS2018 -- which this one is -- have been
+# independently shown to degrade toward random performance on external
+# traffic. Full derivation, per-attack-type table, and both dataset-level
+# caveats (this one plus ~7.5% documented label noise) in the README's
+# Cortex-Network section.
 
 static:
   allow_below: 0.6163460957      # score <  this -> ALLOW
@@ -45,6 +82,27 @@ static:
 
 behavioral:
   malicious_at_or_above: 0.60  # score >= this -> MALICIOUS, else BENIGN
+
+memory:
+  malicious_at_or_above: 0.0005358335957155212  # score >= this -> MALICIOUS, else BENIGN (capped at ALERT, never BLOCK/TERMINATE)
+
+network:
+  malicious_at_or_above: 0.9441855970306654  # score >= this -> MALICIOUS, else BENIGN (capped at ALERT, never BLOCK/TERMINATE)
+
+# emulation.*: LOGGING / TELEMETRY ONLY -- not a policy input. target_fpr=1%
+# point from the val+test sweep against data/models/cortex_emulation_best.pt
+# (1D-CNN+attention, embed_dim=64, Quo Vadis Speakeasy module_entry traces).
+# Cortex-Emulation is NOT in inference/policy_engine.py::decide() -- its
+# deployment status is report-only / additive (mirroring malware-ml's
+# Behavioral v2: additive_report_only_not_in_policy_decision). Reason is
+# stricter than memory's/network's ALERT cap: an ablation-confirmed Jan->Apr
+# 2022 temporal concept-drift collapse (malicious recall 70.7% -> 41.5% at
+# embed_dim=64, 68.0% -> 38.3% at embed_dim=32 -- unchanged by capacity
+# reduction) and only ~+3-4 pp test accuracy over a trivial train-sequence
+# duplicate-lookup baseline. Full sweep table + drift diagnostic in the
+# README's "Cortex-Emulation" section.
+emulation:
+  malicious_at_or_above: 0.999358594417572  # telemetry EmulationVerdict only; never reaches decide()
 
 sequence:
   max_api_calls: 100

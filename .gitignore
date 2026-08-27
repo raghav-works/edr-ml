@@ -18,6 +18,7 @@ __pycache__/
 data/processed/
 data/models/
 data/raw_behavioral_cache/
+data/raw/
 
 # Large/generated file types, as a safety net wherever they end up
 *.parquet

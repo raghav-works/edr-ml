@@ -1,4 +1,5 @@
-"""ONNX export for Cortex-Static (LightGBM) and Cortex-Behavioral (PyTorch)."""
+"""ONNX export for Cortex-Static, Cortex-Memory, and Cortex-Network (all
+LightGBM), and Cortex-Behavioral (PyTorch)."""
 
 from __future__ import annotations
 
@@ -15,6 +16,9 @@ logger = logging.getLogger("cortex.export.onnx")
 # support"). The exported graph is upgraded to this same opset afterward via
 # onnx.version_converter so it can be merged with the skl2onnx-converted
 # calibrator subgraph below, which onnxruntime/skl2onnx target at 15 too.
+# Applies to any onnxmltools-converted LightGBM booster, not just static's
+# -- shared by export_static_lgbm_to_onnx and export_memory_lgbm_to_onnx
+# below, since both go through the identical onnxmltools/skl2onnx path.
 #
 # Verified against the real cortex_static model (2996 trees) and a
 # realistic synthetic model (47 trees): raw and calibrated ONNX outputs
@@ -27,7 +31,7 @@ logger = logging.getLogger("cortex.export.onnx")
 # onnxmltools quirk with extremely shallow/degenerate boosters -- but a
 # 47-tree model showed no such issue, and no realistically-sized model
 # should ever hit this.
-_STATIC_ONNX_OPSET = 15
+_LGBM_ONNX_OPSET = 15
 
 
 def export_static_lgbm_to_onnx(model_path: str, output_path: str, num_features: int = 2568) -> None:
@@ -63,7 +67,7 @@ def export_static_lgbm_to_onnx(model_path: str, output_path: str, num_features: 
 
     lgbm_onnx = convert_lightgbm(
         model.booster, initial_types=[("input", FloatTensorType([None, num_features]))],
-        target_opset=_STATIC_ONNX_OPSET, zipmap=False,
+        target_opset=_LGBM_ONNX_OPSET, zipmap=False,
     )
     # "probabilities" here is [N, 2] = [P(benign), P(malicious)]. Slice out
     # column 1. The graph is still opset-9 for the default domain at this
@@ -78,7 +82,7 @@ def export_static_lgbm_to_onnx(model_path: str, output_path: str, num_features: 
     lgbm_onnx.graph.output.append(
         onnx.helper.make_tensor_value_info("malicious_prob_col", onnx.TensorProto.FLOAT, [None, 1])
     )
-    lgbm_onnx = onnx.version_converter.convert_version(lgbm_onnx, _STATIC_ONNX_OPSET)
+    lgbm_onnx = onnx.version_converter.convert_version(lgbm_onnx, _LGBM_ONNX_OPSET)
 
     if model.calibrator is not None:
         from skl2onnx import convert_sklearn
@@ -86,7 +90,7 @@ def export_static_lgbm_to_onnx(model_path: str, output_path: str, num_features: 
 
         calibrator_onnx = convert_sklearn(
             model.calibrator._lr, initial_types=[("float_input", SkFloatTensorType([None, 1]))],
-            target_opset=_STATIC_ONNX_OPSET, options={id(model.calibrator._lr): {"zipmap": False}},
+            target_opset=_LGBM_ONNX_OPSET, options={id(model.calibrator._lr): {"zipmap": False}},
         )
         lgbm_onnx.ir_version = calibrator_onnx.ir_version  # onnxmltools/skl2onnx target different IR versions
         calibrator_onnx = onnx.compose.add_prefix(calibrator_onnx, prefix="calib_")  # both graphs use "label"/"probabilities"
@@ -137,6 +141,214 @@ def export_static_lgbm_to_onnx(model_path: str, output_path: str, num_features: 
         f.write(merged.SerializeToString())
     logger.info(
         "Static model exported to %s (calibrator %s, %.2f MB)",
+        output_path, "chained into graph" if model.calibrator is not None else "absent",
+        Path(output_path).stat().st_size / 1e6,
+    )
+
+
+def export_memory_lgbm_to_onnx(model_path: str, output_path: str, num_features: int = 62) -> None:
+    """Convert a saved Cortex-Memory model (MemoryLGBMModel.save() output --
+    `<model_path>.lgbm` + `<model_path>.meta`) to a single self-contained
+    ONNX file. Structurally identical to export_static_lgbm_to_onnx() above
+    (same onnxmltools -> skl2onnx -> graph-merge path, same opset
+    constraints and degenerate-booster caveat -- see that function's
+    docstring and _LGBM_ONNX_OPSET's comment for the full rationale, which
+    applies here unchanged since both are LightGBM + optional Platt
+    calibrator). Duplicated rather than parameterized into one shared
+    function to keep static's and memory's export paths independent, the
+    same way models/memory_lgbm.py duplicates rather than imports
+    static_lgbm.py's PlattCalibrator.
+
+    As with static, the calibrator (if present) is merged into the SAME
+    graph, chained after the booster's raw probability output, so the
+    exported model's one output, "malicious_probability", is the
+    *calibrated* probability -- exactly what MemoryLGBMModel.predict_proba()
+    returns, matching what inference/policy_engine.py's MEMORY_MALICIOUS_MIN
+    was derived against. Verified against the real cortex_memory model and
+    the actual CIC-MalMem-2022 test split -- see the README's ONNX export
+    section for the measured max/mean absolute error.
+    """
+    import onnx
+    import onnx.compose
+    import onnx.numpy_helper
+    import onnx.version_converter
+    from onnxmltools import convert_lightgbm
+    from onnxmltools.convert.common.data_types import FloatTensorType
+
+    from models.memory_lgbm import MemoryLGBMModel
+
+    model = MemoryLGBMModel.load(model_path)
+
+    lgbm_onnx = convert_lightgbm(
+        model.booster, initial_types=[("input", FloatTensorType([None, num_features]))],
+        target_opset=_LGBM_ONNX_OPSET, zipmap=False,
+    )
+    lgbm_onnx.graph.node.append(onnx.helper.make_node(
+        "Slice", inputs=["probabilities"], outputs=["malicious_prob_col"],
+        starts=[1], ends=[2], axes=[1],
+    ))
+    lgbm_onnx.graph.output.append(
+        onnx.helper.make_tensor_value_info("malicious_prob_col", onnx.TensorProto.FLOAT, [None, 1])
+    )
+    lgbm_onnx = onnx.version_converter.convert_version(lgbm_onnx, _LGBM_ONNX_OPSET)
+
+    if model.calibrator is not None:
+        from skl2onnx import convert_sklearn
+        from skl2onnx.common.data_types import FloatTensorType as SkFloatTensorType
+
+        calibrator_onnx = convert_sklearn(
+            model.calibrator._lr, initial_types=[("float_input", SkFloatTensorType([None, 1]))],
+            target_opset=_LGBM_ONNX_OPSET, options={id(model.calibrator._lr): {"zipmap": False}},
+        )
+        lgbm_onnx.ir_version = calibrator_onnx.ir_version
+        calibrator_onnx = onnx.compose.add_prefix(calibrator_onnx, prefix="calib_")
+
+        merged = onnx.compose.merge_models(
+            lgbm_onnx, calibrator_onnx, io_map=[("malicious_prob_col", "calib_float_input")],
+        )
+        prob_source = "calib_probabilities"
+    else:
+        merged = lgbm_onnx
+        prob_source = None
+
+    if prob_source is not None:
+        merged.graph.node.append(onnx.helper.make_node(
+            "Slice", inputs=[prob_source, "final_slice_starts", "final_slice_ends", "final_slice_axes"],
+            outputs=["malicious_probability_col"],
+        ))
+        merged.graph.initializer.extend([
+            onnx.numpy_helper.from_array(np.array([1], dtype=np.int64), name="final_slice_starts"),
+            onnx.numpy_helper.from_array(np.array([2], dtype=np.int64), name="final_slice_ends"),
+            onnx.numpy_helper.from_array(np.array([1], dtype=np.int64), name="final_slice_axes"),
+        ])
+        merged.graph.node.append(onnx.helper.make_node(
+            "Squeeze", inputs=["malicious_probability_col", "final_squeeze_axes"],
+            outputs=["malicious_probability"],
+        ))
+        merged.graph.initializer.append(
+            onnx.numpy_helper.from_array(np.array([1], dtype=np.int64), name="final_squeeze_axes")
+        )
+    else:
+        merged.graph.node.append(onnx.helper.make_node(
+            "Squeeze", inputs=["malicious_prob_col", "final_squeeze_axes"], outputs=["malicious_probability"],
+        ))
+        merged.graph.initializer.append(
+            onnx.numpy_helper.from_array(np.array([1], dtype=np.int64), name="final_squeeze_axes")
+        )
+    del merged.graph.output[:]
+    merged.graph.output.append(
+        onnx.helper.make_tensor_value_info("malicious_probability", onnx.TensorProto.FLOAT, [None])
+    )
+
+    onnx.checker.check_model(merged)
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, "wb") as f:
+        f.write(merged.SerializeToString())
+    logger.info(
+        "Memory model exported to %s (calibrator %s, %.2f MB)",
+        output_path, "chained into graph" if model.calibrator is not None else "absent",
+        Path(output_path).stat().st_size / 1e6,
+    )
+
+
+def export_network_lgbm_to_onnx(model_path: str, output_path: str, num_features: int = 78) -> None:
+    """Convert a saved Cortex-Network model (NetworkLGBMModel.save() output --
+    `<model_path>.lgbm` + `<model_path>.meta`) to a single self-contained
+    ONNX file. Structurally identical to export_static_lgbm_to_onnx() and
+    export_memory_lgbm_to_onnx() above (same onnxmltools -> skl2onnx ->
+    graph-merge path, same opset constraints and degenerate-booster caveat
+    -- see export_static_lgbm_to_onnx's docstring and _LGBM_ONNX_OPSET's
+    comment for the full rationale). Duplicated rather than parameterized
+    into one shared function, same rationale as memory's copy of this
+    function relative to static's.
+
+    As with static and memory, the calibrator (if present) is merged into
+    the SAME graph, chained after the booster's raw probability output, so
+    the exported model's one output, "malicious_probability", is the
+    *calibrated* probability -- exactly what NetworkLGBMModel.predict_proba()
+    returns, matching what inference/policy_engine.py's NETWORK_MALICIOUS_MIN
+    was derived against. Verified against the real cortex_network model and
+    the actual CSE-CIC-IDS2018 test split -- see the README's ONNX export
+    section for the measured max/mean absolute error.
+    """
+    import onnx
+    import onnx.compose
+    import onnx.numpy_helper
+    import onnx.version_converter
+    from onnxmltools import convert_lightgbm
+    from onnxmltools.convert.common.data_types import FloatTensorType
+
+    from models.network_lgbm import NetworkLGBMModel
+
+    model = NetworkLGBMModel.load(model_path)
+
+    lgbm_onnx = convert_lightgbm(
+        model.booster, initial_types=[("input", FloatTensorType([None, num_features]))],
+        target_opset=_LGBM_ONNX_OPSET, zipmap=False,
+    )
+    lgbm_onnx.graph.node.append(onnx.helper.make_node(
+        "Slice", inputs=["probabilities"], outputs=["malicious_prob_col"],
+        starts=[1], ends=[2], axes=[1],
+    ))
+    lgbm_onnx.graph.output.append(
+        onnx.helper.make_tensor_value_info("malicious_prob_col", onnx.TensorProto.FLOAT, [None, 1])
+    )
+    lgbm_onnx = onnx.version_converter.convert_version(lgbm_onnx, _LGBM_ONNX_OPSET)
+
+    if model.calibrator is not None:
+        from skl2onnx import convert_sklearn
+        from skl2onnx.common.data_types import FloatTensorType as SkFloatTensorType
+
+        calibrator_onnx = convert_sklearn(
+            model.calibrator._lr, initial_types=[("float_input", SkFloatTensorType([None, 1]))],
+            target_opset=_LGBM_ONNX_OPSET, options={id(model.calibrator._lr): {"zipmap": False}},
+        )
+        lgbm_onnx.ir_version = calibrator_onnx.ir_version
+        calibrator_onnx = onnx.compose.add_prefix(calibrator_onnx, prefix="calib_")
+
+        merged = onnx.compose.merge_models(
+            lgbm_onnx, calibrator_onnx, io_map=[("malicious_prob_col", "calib_float_input")],
+        )
+        prob_source = "calib_probabilities"
+    else:
+        merged = lgbm_onnx
+        prob_source = None
+
+    if prob_source is not None:
+        merged.graph.node.append(onnx.helper.make_node(
+            "Slice", inputs=[prob_source, "final_slice_starts", "final_slice_ends", "final_slice_axes"],
+            outputs=["malicious_probability_col"],
+        ))
+        merged.graph.initializer.extend([
+            onnx.numpy_helper.from_array(np.array([1], dtype=np.int64), name="final_slice_starts"),
+            onnx.numpy_helper.from_array(np.array([2], dtype=np.int64), name="final_slice_ends"),
+            onnx.numpy_helper.from_array(np.array([1], dtype=np.int64), name="final_slice_axes"),
+        ])
+        merged.graph.node.append(onnx.helper.make_node(
+            "Squeeze", inputs=["malicious_probability_col", "final_squeeze_axes"],
+            outputs=["malicious_probability"],
+        ))
+        merged.graph.initializer.append(
+            onnx.numpy_helper.from_array(np.array([1], dtype=np.int64), name="final_squeeze_axes")
+        )
+    else:
+        merged.graph.node.append(onnx.helper.make_node(
+            "Squeeze", inputs=["malicious_prob_col", "final_squeeze_axes"], outputs=["malicious_probability"],
+        ))
+        merged.graph.initializer.append(
+            onnx.numpy_helper.from_array(np.array([1], dtype=np.int64), name="final_squeeze_axes")
+        )
+    del merged.graph.output[:]
+    merged.graph.output.append(
+        onnx.helper.make_tensor_value_info("malicious_probability", onnx.TensorProto.FLOAT, [None])
+    )
+
+    onnx.checker.check_model(merged)
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, "wb") as f:
+        f.write(merged.SerializeToString())
+    logger.info(
+        "Network model exported to %s (calibrator %s, %.2f MB)",
         output_path, "chained into graph" if model.calibrator is not None else "absent",
         Path(output_path).stat().st_size / 1e6,
     )
