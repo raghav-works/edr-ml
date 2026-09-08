@@ -33,6 +33,11 @@ from typing import Optional
 # BLOCK value the recalibrated model blocks at only ~0.03% FPR / 86% det.
 STATIC_ALLOW_MAX = 0.5471026402140103   # score <  this -> ALLOW
 STATIC_BLOCK_MIN = 0.9798998555119341   # score >= this -> BLOCK   (between the two -> ALERT)
+# INTERIM CAP (2026-09-08): a score >= STATIC_BLOCK_MIN still yields
+# StaticVerdict.BLOCK, but decide() demotes that to a final ALERT (not BLOCK)
+# -- 2/5 confirmed-benign real binaries still cross this line post-
+# calibration-fix. See decide()'s "INTERIM CAP" docstring section for the
+# evidence and the removal criteria.
 
 # Behavioral threshold re-derived against data/models/cortex_behavioral_best.pt
 # (1D-CNN+attention, trained on the deduplicated Mal-API-2019+MalbehavD-V1+
@@ -312,16 +317,54 @@ def decide(
 ) -> tuple[FinalDecision, list[str]]:
     """
     Priority order (never averaged):
-        1. static BLOCK              -> BLOCK          (always protected)
-        2. behavioral MALICIOUS      -> TERMINATE
-        3. memory MALICIOUS          -> ALERT           (capped -- see below)
-        4. network MALICIOUS         -> ALERT           (capped -- see below)
-        5. static ALERT              -> ALERT
-        6. static ERROR              -> ALERT
-        7. behavioral ERROR          -> ALERT
-        8. memory ERROR              -> ALERT
-        9. network ERROR             -> ALERT
-        10. otherwise                 -> ALLOW
+        1. behavioral MALICIOUS      -> TERMINATE
+        2. memory MALICIOUS          -> ALERT           (capped -- see below)
+        3. network MALICIOUS         -> ALERT           (capped -- see below)
+        4. static ALERT  or  BLOCK   -> ALERT           (BLOCK is INTERIM-
+                                                         CAPPED to ALERT --
+                                                         see below)
+        5. static ERROR              -> ALERT
+        6. behavioral ERROR          -> ALERT
+        7. memory ERROR              -> ALERT
+        8. network ERROR             -> ALERT
+        9. otherwise                 -> ALLOW
+
+    INTERIM CAP on Cortex-Static's BLOCK authority (added 2026-09-08)
+    ---------------------------------------------------------------
+    Static's BLOCK verdict is demoted to ALERT here: a static score above
+    STATIC_BLOCK_MIN can no longer autonomously block a file, only raise the
+    outcome to ALERT (the same rung as static's own ALERT and as
+    memory/network MALICIOUS). `static_verdict` still reports BLOCK for
+    telemetry/audit; only the policy consequence is capped, and the reason
+    code `static_block_capped_at_alert` records each time it happens.
+
+    Why: BLOCK was the one uncapped, autonomous verdict in this function,
+    and validation shows it is not safe to trust yet.
+    - The Platt-calibration bug is fixed (calibrators now fit on raw booster
+      margins, not sigmoid probabilities) and STATIC_ALLOW_MAX/STATIC_BLOCK_MIN
+      were re-derived -- but Platt scaling is a monotonic transform, so it
+      cannot change the booster's *ranking* of files.
+    - In the post-fix 5-file check, 2 of 5 confirmed-benign Windows binaries
+      still land at/above STATIC_BLOCK_MIN and would still be wrongly BLOCKed:
+      benign_test_50mb.exe (raw booster margin +3.81 -> calibrated 0.980) and
+      extractor.exe (+4.48 -> 0.990). Their raw margins rank them among the
+      most-malicious-looking files in the set -- the known PyInstaller /
+      atypical-large-PE false-positive pattern, compounded by the documented
+      pe_features.py-vs-thrember feature-fidelity skew (cortex-ml's live
+      feature vector skews toward "malicious").
+    - No calibration or threshold change fixes a ranking problem; only the
+      feature-fidelity work does.
+
+    Removal criteria (ALL required):
+    - the pe_features.py feature-parity test exists and passes against a
+      reference extractor (thrember) on real PEs incl. a signed binary
+      (README open item #1); AND
+    - the residual pe_features.py-vs-thrember skew is closed (open item #2);
+      AND
+    - Cortex-Static is re-validated on a real-world confirmed-label file set
+      (benign + malicious) with no confirmed-benign file at or above
+      STATIC_BLOCK_MIN.
+    Until then, do not restore the autonomous BLOCK branch.
 
     Memory is evaluated as an independent third signal, NOT gated behind a
     static ALLOW the way behavioral is (see pipeline.py: memory runs
@@ -391,9 +434,11 @@ def decide(
     """
     reasons: list[str] = []
 
-    if static_verdict == StaticVerdict.BLOCK:
-        reasons.append("static_block")
-        return FinalDecision.BLOCK, reasons
+    # Cortex-Static's BLOCK verdict is NOT an autonomous top-priority block.
+    # It is interim-capped to ALERT (see this function's docstring for the
+    # evidence and the removal criteria) and handled together with static
+    # ALERT below -- after the behavioral MALICIOUS check, so a validated
+    # behavioral signal can still escalate the same file to TERMINATE.
 
     if behavioral_verdict == BehavioralVerdict.MALICIOUS:
         reasons.append("behavioral_malicious")
@@ -407,8 +452,14 @@ def decide(
         reasons.append("network_malicious")
         return FinalDecision.ALERT, reasons
 
-    if static_verdict == StaticVerdict.ALERT:
-        reasons.append("static_alert")
+    if static_verdict in (StaticVerdict.ALERT, StaticVerdict.BLOCK):
+        # static BLOCK demoted to ALERT (interim cap); the distinct reason
+        # code keeps the demotion visible in the audit trail.
+        reasons.append(
+            "static_block_capped_at_alert"
+            if static_verdict == StaticVerdict.BLOCK
+            else "static_alert"
+        )
         return FinalDecision.ALERT, reasons
 
     if static_verdict == StaticVerdict.ERROR:
