@@ -88,6 +88,30 @@ def export_static_lgbm_to_onnx(model_path: str, output_path: str, num_features: 
         from skl2onnx import convert_sklearn
         from skl2onnx.common.data_types import FloatTensorType as SkFloatTensorType
 
+        # The Platt calibrator is now fit on the booster's raw margins
+        # (logits), not on its sigmoid probability. onnxmltools'
+        # TreeEnsembleClassifier only exposes the post-sigmoid probability, so
+        # reconstruct the margin in-graph before the calibrator subgraph:
+        #   margin = logit(p) = log(p) - log(1 - p)
+        # p is clipped off {0, 1} so log() stays finite when float32 rounds a
+        # very confident score to exactly 0.0 / 1.0.
+        _LOGIT_EPS = 1e-7
+        lgbm_onnx.graph.initializer.extend([
+            onnx.numpy_helper.from_array(np.array(_LOGIT_EPS, dtype=np.float32), name="logit_eps"),
+            onnx.numpy_helper.from_array(np.array(1.0 - _LOGIT_EPS, dtype=np.float32), name="logit_1m_eps"),
+            onnx.numpy_helper.from_array(np.array(1.0, dtype=np.float32), name="logit_one"),
+        ])
+        lgbm_onnx.graph.node.extend([
+            onnx.helper.make_node("Clip", ["malicious_prob_col", "logit_eps", "logit_1m_eps"], ["logit_p"]),
+            onnx.helper.make_node("Log", ["logit_p"], ["logit_log_p"]),
+            onnx.helper.make_node("Sub", ["logit_one", "logit_p"], ["logit_1m_p"]),
+            onnx.helper.make_node("Log", ["logit_1m_p"], ["logit_log_1m_p"]),
+            onnx.helper.make_node("Sub", ["logit_log_p", "logit_log_1m_p"], ["malicious_margin_col"]),
+        ])
+        lgbm_onnx.graph.output.append(
+            onnx.helper.make_tensor_value_info("malicious_margin_col", onnx.TensorProto.FLOAT, [None, 1])
+        )
+
         calibrator_onnx = convert_sklearn(
             model.calibrator._lr, initial_types=[("float_input", SkFloatTensorType([None, 1]))],
             target_opset=_LGBM_ONNX_OPSET, options={id(model.calibrator._lr): {"zipmap": False}},
@@ -96,7 +120,7 @@ def export_static_lgbm_to_onnx(model_path: str, output_path: str, num_features: 
         calibrator_onnx = onnx.compose.add_prefix(calibrator_onnx, prefix="calib_")  # both graphs use "label"/"probabilities"
 
         merged = onnx.compose.merge_models(
-            lgbm_onnx, calibrator_onnx, io_map=[("malicious_prob_col", "calib_float_input")],
+            lgbm_onnx, calibrator_onnx, io_map=[("malicious_margin_col", "calib_float_input")],
         )
         prob_source = "calib_probabilities"  # [N, 2] = [P(benign), P(malicious)] from the calibrator
     else:
@@ -196,6 +220,30 @@ def export_memory_lgbm_to_onnx(model_path: str, output_path: str, num_features: 
         from skl2onnx import convert_sklearn
         from skl2onnx.common.data_types import FloatTensorType as SkFloatTensorType
 
+        # The Platt calibrator is now fit on the booster's raw margins
+        # (logits), not on its sigmoid probability. onnxmltools'
+        # TreeEnsembleClassifier only exposes the post-sigmoid probability, so
+        # reconstruct the margin in-graph before the calibrator subgraph:
+        #   margin = logit(p) = log(p) - log(1 - p)
+        # p is clipped off {0, 1} so log() stays finite when float32 rounds a
+        # very confident score to exactly 0.0 / 1.0.
+        _LOGIT_EPS = 1e-7
+        lgbm_onnx.graph.initializer.extend([
+            onnx.numpy_helper.from_array(np.array(_LOGIT_EPS, dtype=np.float32), name="logit_eps"),
+            onnx.numpy_helper.from_array(np.array(1.0 - _LOGIT_EPS, dtype=np.float32), name="logit_1m_eps"),
+            onnx.numpy_helper.from_array(np.array(1.0, dtype=np.float32), name="logit_one"),
+        ])
+        lgbm_onnx.graph.node.extend([
+            onnx.helper.make_node("Clip", ["malicious_prob_col", "logit_eps", "logit_1m_eps"], ["logit_p"]),
+            onnx.helper.make_node("Log", ["logit_p"], ["logit_log_p"]),
+            onnx.helper.make_node("Sub", ["logit_one", "logit_p"], ["logit_1m_p"]),
+            onnx.helper.make_node("Log", ["logit_1m_p"], ["logit_log_1m_p"]),
+            onnx.helper.make_node("Sub", ["logit_log_p", "logit_log_1m_p"], ["malicious_margin_col"]),
+        ])
+        lgbm_onnx.graph.output.append(
+            onnx.helper.make_tensor_value_info("malicious_margin_col", onnx.TensorProto.FLOAT, [None, 1])
+        )
+
         calibrator_onnx = convert_sklearn(
             model.calibrator._lr, initial_types=[("float_input", SkFloatTensorType([None, 1]))],
             target_opset=_LGBM_ONNX_OPSET, options={id(model.calibrator._lr): {"zipmap": False}},
@@ -204,7 +252,7 @@ def export_memory_lgbm_to_onnx(model_path: str, output_path: str, num_features: 
         calibrator_onnx = onnx.compose.add_prefix(calibrator_onnx, prefix="calib_")
 
         merged = onnx.compose.merge_models(
-            lgbm_onnx, calibrator_onnx, io_map=[("malicious_prob_col", "calib_float_input")],
+            lgbm_onnx, calibrator_onnx, io_map=[("malicious_margin_col", "calib_float_input")],
         )
         prob_source = "calib_probabilities"
     else:
@@ -299,6 +347,30 @@ def export_network_lgbm_to_onnx(model_path: str, output_path: str, num_features:
         from skl2onnx import convert_sklearn
         from skl2onnx.common.data_types import FloatTensorType as SkFloatTensorType
 
+        # The Platt calibrator is now fit on the booster's raw margins
+        # (logits), not on its sigmoid probability. onnxmltools'
+        # TreeEnsembleClassifier only exposes the post-sigmoid probability, so
+        # reconstruct the margin in-graph before the calibrator subgraph:
+        #   margin = logit(p) = log(p) - log(1 - p)
+        # p is clipped off {0, 1} so log() stays finite when float32 rounds a
+        # very confident score to exactly 0.0 / 1.0.
+        _LOGIT_EPS = 1e-7
+        lgbm_onnx.graph.initializer.extend([
+            onnx.numpy_helper.from_array(np.array(_LOGIT_EPS, dtype=np.float32), name="logit_eps"),
+            onnx.numpy_helper.from_array(np.array(1.0 - _LOGIT_EPS, dtype=np.float32), name="logit_1m_eps"),
+            onnx.numpy_helper.from_array(np.array(1.0, dtype=np.float32), name="logit_one"),
+        ])
+        lgbm_onnx.graph.node.extend([
+            onnx.helper.make_node("Clip", ["malicious_prob_col", "logit_eps", "logit_1m_eps"], ["logit_p"]),
+            onnx.helper.make_node("Log", ["logit_p"], ["logit_log_p"]),
+            onnx.helper.make_node("Sub", ["logit_one", "logit_p"], ["logit_1m_p"]),
+            onnx.helper.make_node("Log", ["logit_1m_p"], ["logit_log_1m_p"]),
+            onnx.helper.make_node("Sub", ["logit_log_p", "logit_log_1m_p"], ["malicious_margin_col"]),
+        ])
+        lgbm_onnx.graph.output.append(
+            onnx.helper.make_tensor_value_info("malicious_margin_col", onnx.TensorProto.FLOAT, [None, 1])
+        )
+
         calibrator_onnx = convert_sklearn(
             model.calibrator._lr, initial_types=[("float_input", SkFloatTensorType([None, 1]))],
             target_opset=_LGBM_ONNX_OPSET, options={id(model.calibrator._lr): {"zipmap": False}},
@@ -307,7 +379,7 @@ def export_network_lgbm_to_onnx(model_path: str, output_path: str, num_features:
         calibrator_onnx = onnx.compose.add_prefix(calibrator_onnx, prefix="calib_")
 
         merged = onnx.compose.merge_models(
-            lgbm_onnx, calibrator_onnx, io_map=[("malicious_prob_col", "calib_float_input")],
+            lgbm_onnx, calibrator_onnx, io_map=[("malicious_margin_col", "calib_float_input")],
         )
         prob_source = "calib_probabilities"
     else:

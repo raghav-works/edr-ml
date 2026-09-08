@@ -107,8 +107,13 @@ class NetworkLGBMModel:
     def predict_proba(self, X: NDArray[np.float32]) -> NDArray[np.float64]:
         if X.shape[1] != self.feature_count:
             raise ValueError(f"Expected {self.feature_count} features, got {X.shape[1]}")
-        raw = self.booster.predict(X, num_iteration=self.num_iterations)
-        return self.calibrator.predict_proba(raw) if self.calibrator else raw
+        if self.calibrator is not None:
+            # Platt calibrator is fit on raw booster margins (logits), not on
+            # the booster's sigmoid probability -- inference must feed it the
+            # same raw_score=True margins used at fit time (see train()).
+            margins = self.booster.predict(X, raw_score=True, num_iteration=self.num_iterations)
+            return self.calibrator.predict_proba(margins)
+        return self.booster.predict(X, num_iteration=self.num_iterations)
 
     def predict(self, X: NDArray[np.float32], threshold: float = 0.5) -> NDArray[np.int32]:
         return (self.predict_proba(X) >= threshold).astype(np.int32)
@@ -159,8 +164,12 @@ def train(
 
     calibrator = None
     if calibrate:
-        raw_val_scores = booster.predict(X_val, num_iteration=booster.best_iteration)
-        calibrator = PlattCalibrator().fit(raw_val_scores, y_val)
+        # Textbook Platt scaling fits the logistic regression on the model's
+        # raw margins, NOT on probabilities -- fitting on the sigmoid output
+        # of a near-separable booster collapses the calibrator into a
+        # near-step function (see models/static_lgbm.py::train()).
+        raw_val_margins = booster.predict(X_val, raw_score=True, num_iteration=booster.best_iteration)
+        calibrator = PlattCalibrator().fit(raw_val_margins, y_val)
 
     return NetworkLGBMModel(booster=booster, calibrator=calibrator, feature_count=feature_count,
                              num_iterations=booster.best_iteration, model_hash=_model_hash(booster))
