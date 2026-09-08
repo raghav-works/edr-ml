@@ -3,15 +3,33 @@
 Running tracker for known-but-deferred work. Blocking review items 1–6 are
 done (see git log); this is what remains.
 
-## Structural (in progress / next)
+## Structural
 
-- **Feature-parity harness for `pe_features.py`** — compare live extraction
-  against `features/ember2024_adapter.py` on real PE files (incl. a signed
-  binary). Must assert the exports-count slot `feature_2276 == len(export
-  names)` on both paths (see the `TODO` in `ExportsInfo.process_raw_features`).
-- **Baseline `pytest` suite** — none exists. Seed from
-  `scripts/verify_onnx_parity.py` and the `decide()` truth-table checks used
-  for review items 2 and 6 (→ `tests/test_policy_engine.py`).
+- **Feature-parity harness for `pe_features.py`** — MVP DONE
+  (`tests/test_static_feature_parity.py`, item 7): vector contract,
+  determinism, signed-binary authenticode, ExportsInfo count slot, and
+  adapter-passthrough parity, on committed synthetic PE fixtures. Two
+  sub-items remain:
+  - **Real EMBER2024 record schema check.** The adapter assumes an
+    EMBER2024 record's group dicts (`record["general"]`,
+    `record["header"]["coff"]`, ...) have the exact keys/shape that
+    `pe_features.raw_features()` produces. The MVP only proves the adapter
+    faithfully processes a dict `raw_features` itself made. Verifying
+    against a *real* record needs a small (~100-record) pull from
+    `joyce8/EMBER2024` on HF — NOT a full parquet regeneration. Needed
+    before trusting the adapter beyond "faithful passthrough".
+  - **`thrember` skew-quantification cross-check.** Compare the live
+    `pe_features` vector against the gold-standard `thrember` extractor on
+    real PEs, per group, to quantify the documented "skews toward
+    malicious" gap. BLOCKED in this repo's main venv: `thrember` (a git
+    install from the EMBER2024 repo) imports the pre-0.9 `signify`
+    authenticode API, and item 4 pinned `signify>=0.9,<0.10`. The two
+    cannot coexist — this check needs a separate venv (or to run inside
+    the `malware-ml` venv, which already has `thrember` + old `signify`).
+- **Baseline `pytest` suite** — item 8. `tests/` scaffold (`conftest.py`,
+  `pytest.ini`) exists from item 7. Still to add:
+  `tests/test_policy_engine.py` (the `decide()` truth table run by hand all
+  session) and a pytest wrapper around `scripts/verify_onnx_parity.py`.
 
 ## Deferred to a deliberate retrain pass
 

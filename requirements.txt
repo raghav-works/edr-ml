@@ -26,3 +26,6 @@ onnx>=1.16
 onnxruntime>=1.17
 onnxmltools>=1.12
 skl2onnx>=1.16
+
+# Test
+pytest>=8.0
