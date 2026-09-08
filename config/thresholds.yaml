@@ -1,5 +1,14 @@
 # Decision thresholds — must match inference/policy_engine.py constants.
 #
+# static.*, memory.*, network.* RE-DERIVED 2026-09-08 after the Platt-
+# calibrator fix (models/*_lgbm.py calibrators now fit on raw booster
+# margins, not sigmoid probabilities; ONNX export reconstructs the margin
+# in-graph). Boosters are unchanged, so every AUC and every operating point
+# (FPR/detection at target FPR) is unchanged -- only the calibrated score
+# scale moved, so the raw values below differ from the pre-fix ones. See the
+# per-constant comments in inference/policy_engine.py for the pre-fix values
+# and why the old ones must not be reused with the recalibrated models.
+#
 # static.*: re-derived against data/models/cortex_static (LightGBM trained
 # on the deduplicated EMBER2024 PE-format train split, 2.34M rows) via
 # models.static_lgbm.find_threshold_for_fpr() on the calibrated
@@ -77,17 +86,17 @@
 # Cortex-Network section.
 
 static:
-  allow_below: 0.6163460957      # score <  this -> ALLOW
-  block_at_or_above: 0.9950119117  # score >= this -> BLOCK (else ALERT)
+  allow_below: 0.5471026402140103      # score <  this -> ALLOW   (pre-calibration-fix: 0.6163460957)
+  block_at_or_above: 0.9798998555119341  # score >= this -> BLOCK (else ALERT)  (pre-fix: 0.9950119117)
 
 behavioral:
   malicious_at_or_above: 0.60  # score >= this -> MALICIOUS, else BENIGN
 
 memory:
-  malicious_at_or_above: 0.0005358335957155212  # score >= this -> MALICIOUS, else BENIGN (capped at ALERT, never BLOCK/TERMINATE)
+  malicious_at_or_above: 0.0006464189644018  # score >= this -> MALICIOUS, else BENIGN (capped at ALERT, never BLOCK/TERMINATE)  (pre-fix: 0.0005358335957155212)
 
 network:
-  malicious_at_or_above: 0.9441855970306654  # score >= this -> MALICIOUS, else BENIGN (capped at ALERT, never BLOCK/TERMINATE)
+  malicious_at_or_above: 0.5883628015255921  # score >= this -> MALICIOUS, else BENIGN (capped at ALERT, never BLOCK/TERMINATE)  (pre-fix: 0.9441855970306654)
 
 # emulation.*: LOGGING / TELEMETRY ONLY -- not a policy input. target_fpr=1%
 # point from the val+test sweep against data/models/cortex_emulation_best.pt

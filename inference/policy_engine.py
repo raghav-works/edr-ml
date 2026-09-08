@@ -22,12 +22,17 @@ from typing import Optional
 # STATIC_BLOCK_MIN hits the architecture doc's max_fpr@0.1% = 0.001 bar
 # (target_fpr=0.001 -> actual FPR=0.000997, detection_rate=0.9168 at this
 # threshold). STATIC_ALLOW_MAX uses target_fpr=0.01 (actual FPR=0.009999,
-# detection_rate=0.9803): the score distribution has a cliff between
-# target_fpr 0.005 and 0.01 (threshold drops from ~0.96 to ~0.62), so 0.01
-# is the point where ALLOW stops sitting in near-BLOCK territory and starts
-# meaningfully separating from ALERT.
-STATIC_ALLOW_MAX = 0.6163460957      # score <  this -> ALLOW
-STATIC_BLOCK_MIN = 0.9950119117      # score >= this -> BLOCK   (between the two -> ALERT)
+# detection_rate=0.9803).
+#
+# RE-DERIVED 2026-09-08 after the Platt-calibrator fix (calibrators now fit
+# on raw booster margins, not sigmoid probabilities). The booster is
+# unchanged, so AUC-ROC (0.9988) and the operating points above are
+# unchanged -- only the calibrated score scale moved, so these raw values
+# differ from the pre-fix ones (ALLOW was 0.6163460957, BLOCK 0.9950119117).
+# The old values must NOT be used with the recalibrated model: at the old
+# BLOCK value the recalibrated model blocks at only ~0.03% FPR / 86% det.
+STATIC_ALLOW_MAX = 0.5471026402140103   # score <  this -> ALLOW
+STATIC_BLOCK_MIN = 0.9798998555119341   # score >= this -> BLOCK   (between the two -> ALERT)
 
 # Behavioral threshold re-derived against data/models/cortex_behavioral_best.pt
 # (1D-CNN+attention, trained on the deduplicated Mal-API-2019+MalbehavD-V1+
@@ -92,7 +97,13 @@ BEHAVIORAL_MALICIOUS_MIN = 0.60      # score >= this -> MALICIOUS, else BENIGN
 # validation would require memory captures from multiple genuinely
 # different (non-baseline, non-single-VM) benign machines -- not more rows
 # from this same dataset, and not a generic "may not generalize" hand-wave.
-MEMORY_MALICIOUS_MIN: Optional[float] = 0.0005358335957155212
+#
+# RE-DERIVED 2026-09-08 after the Platt-calibrator fix (fit on raw booster
+# margins, not sigmoid probabilities). Booster unchanged -> AUC-ROC (1.0),
+# the val+test sweep counts (55 benign FP at target_fpr=0.01), and the
+# held-out test metrics (FPR 1.13%, detection 100%) are all unchanged; only
+# the calibrated score scale moved. Pre-fix value was 0.0005358335957155212.
+MEMORY_MALICIOUS_MIN: Optional[float] = 0.0006464189644018
 
 # Network threshold -- re-derived against data/models/cortex_network
 # (LightGBM + Platt calibration, trained on scripts/split_network.py's
@@ -143,7 +154,14 @@ MEMORY_MALICIOUS_MIN: Optional[float] = 0.0005358335957155212
 # which (unlike memory's single-legged single-VM finding) rests on two
 # independent legs: the Infiltration blind spot, and the external-
 # validation-collapse pattern.
-NETWORK_MALICIOUS_MIN: Optional[float] = 0.9441855970306654
+#
+# RE-DERIVED 2026-09-08 after the Platt-calibrator fix (fit on raw booster
+# margins, not sigmoid probabilities). Booster unchanged -> AUC-ROC
+# (0.9972) and the held-out test operating point (FPR 0.098%, detection
+# 97.52%) are unchanged; only the calibrated score scale moved (this value
+# dropped a lot in absolute terms because the old near-step calibrator
+# pushed almost everything to ~0 or ~1). Pre-fix value was 0.9441855970306654.
+NETWORK_MALICIOUS_MIN: Optional[float] = 0.5883628015255921
 
 # Emulation threshold -- derived, but for LOGGING / TELEMETRY ONLY. This is
 # the target_fpr=1% point from the val+test sweep against the trained e64
