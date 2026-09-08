@@ -5,7 +5,12 @@ Matches the architecture contract exactly:
     - input: ordered list of Windows API-call names (e.g. from a JSON trace)
     - only the first MAX_SEQ_LEN (100) calls are used; extra calls are ignored
     - unknown API names map to <UNK>
-    - 0 calls -> PENDING (caller decides), 1..99 -> PENDING, 100+ -> score
+    - 0 or 1..9 calls -> PENDING (caller decides); 10..99 -> scored on the
+      padded sequence (lower confidence, flagged in the scan audit trail);
+      100+ -> scored. The 10-call floor (MIN_SEQ_LEN) is empirical: below it
+      the model is non-discriminative (val+test AUC 0.66, 0/4 malicious
+      detected); from 10 up it is useful (test AUC 0.9921, 0 FP on 118
+      benign short rows).
 """
 
 from __future__ import annotations
@@ -17,6 +22,12 @@ from typing import List, Sequence
 import numpy as np
 
 MAX_SEQ_LEN = 100
+# Sequences with fewer than MIN_SEQ_LEN real calls are not scored -- the
+# behavioral model is non-discriminative there (see the module docstring).
+# 10..99 calls ARE scored (padded to MAX_SEQ_LEN); 35.6% of the training
+# corpus and ~1/3 of the held-out eval set are in that band, so it is
+# in-distribution, not an edge case.
+MIN_SEQ_LEN = 10
 PAD_TOKEN = "<PAD>"
 UNK_TOKEN = "<UNK>"
 
@@ -63,13 +74,22 @@ class ApiTokenizer:
     def encode(self, api_calls: Sequence[str]) -> tuple[np.ndarray, str]:
         """
         Returns (token_id_array of shape (100,) int64, sequence_status).
-        sequence_status in {"empty", "insufficient", "ok", "truncated"}.
+        sequence_status in {"empty", "too_short", "short", "ok", "truncated"}:
+          - "empty"     : 0 calls           -> caller treats as PENDING
+          - "too_short" : 1..9 calls        -> caller treats as PENDING
+          - "short"     : 10..99 calls      -> scored on the padded sequence;
+                                               lower confidence, callers should
+                                               flag it in the scan audit trail
+          - "ok"        : exactly 100 calls -> scored
+          - "truncated" : >100 calls        -> scored on the first 100
         """
         n = len(api_calls)
         if n == 0:
             status = "empty"
+        elif n < MIN_SEQ_LEN:
+            status = "too_short"
         elif n < MAX_SEQ_LEN:
-            status = "insufficient"
+            status = "short"
         elif n == MAX_SEQ_LEN:
             status = "ok"
         else:

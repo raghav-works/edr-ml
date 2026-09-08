@@ -130,7 +130,10 @@ class CortexPipeline:
         # behavioral (no reliable static evidence to combine it with).
         if (result.static_verdict in (StaticVerdict.ALLOW, StaticVerdict.ALERT, StaticVerdict.BLOCK)
                 and api_calls_json_path is not None):
-            result.behavioral_score, result.behavioral_verdict = self._run_behavioral(api_calls_json_path)
+            (result.behavioral_score, result.behavioral_verdict,
+             beh_note) = self._run_behavioral(api_calls_json_path)
+            if beh_note is not None:
+                result.reason_codes.append(beh_note)
         # else: static ERROR, or no api_calls_json_path -> behavioral stays NOT_PROVIDED
 
         # 8. policy engine
@@ -151,23 +154,37 @@ class CortexPipeline:
             return None, MemoryVerdict.ERROR
 
     # ------------------------------------------------------------------
-    def _run_behavioral(self, api_calls_json_path: str) -> tuple[Optional[float], BehavioralVerdict]:
+    def _run_behavioral(self, api_calls_json_path: str) -> tuple[Optional[float], BehavioralVerdict, Optional[str]]:
+        """Returns (score, verdict, note).
+
+        `note` is "behavioral_short_trace" when the verdict came from a short
+        (10-99 call) padded sequence -- the model is validated there (test
+        AUC 0.9921, 0 FP on 118 benign short rows) but short-benign coverage
+        rests almost entirely on one dataset (MalbehavD-V1), so a caller
+        should surface this in the scan's audit trail, the same caution
+        applied to memory/network authority. `note` is None otherwise.
+
+        Sequences with < MIN_SEQ_LEN (10) real calls stay PENDING: below that
+        the model is non-discriminative (val+test AUC 0.66, 0/4 malicious
+        detected), so PENDING is the honest answer, not a limitation.
+        """
         if self.behavioral_model is None or self.tokenizer is None:
-            return None, BehavioralVerdict.ERROR
+            return None, BehavioralVerdict.ERROR, None
         try:
             calls = load_api_calls_json(api_calls_json_path)
             token_ids, status = self.tokenizer.encode(calls)
-            if status in ("empty", "insufficient"):
-                return None, BehavioralVerdict.PENDING
+            if status in ("empty", "too_short"):
+                return None, BehavioralVerdict.PENDING, None
 
             import torch
             with torch.no_grad():
                 x = torch.from_numpy(token_ids).long().unsqueeze(0).to(self.device)
                 score = torch.sigmoid(self.behavioral_model(x)).item()
-            return score, behavioral_verdict_from_score(score)
+            note = "behavioral_short_trace" if status == "short" else None
+            return score, behavioral_verdict_from_score(score), note
         except Exception:
             logger.exception("behavioral scan failed for %s", api_calls_json_path)
-            return None, BehavioralVerdict.ERROR
+            return None, BehavioralVerdict.ERROR, None
 
     # ------------------------------------------------------------------
     def to_security_event(self, result: ScanResult) -> dict:

@@ -2,15 +2,19 @@
 
 Independent reimplementation, built to the architecture you specified
 (`Architecture.txt`): **sequential gating, no ensembling**. Static runs
-first; only a static **ALLOW** verdict lets a file proceed to behavioral
-analysis. Scores are never averaged — the policy engine combines *verdicts*
-by fixed priority rules.
+first; a static **ALLOW, ALERT, or BLOCK** verdict lets a file proceed to
+behavioral analysis (only a static scan ERROR skips it). Static's BLOCK is
+currently interim-capped to a final ALERT (see `policy_engine.decide()`'s
+"INTERIM CAP"). Scores are never averaged — the policy engine combines
+*verdicts* by fixed priority rules.
 
 ```
 path validation → PE validation → 2568-dim feature extraction → LightGBM
         → static verdict (ALLOW / ALERT / BLOCK)
-        → [only if ALLOW] → API-call tokenization → 1D-CNN+Attention
+        → [ALLOW / ALERT / BLOCK] → API-call tokenization → 1D-CNN+Attention
               → behavioral verdict (BENIGN / MALICIOUS / PENDING)
+                (PENDING if < 10 API calls; a 10–99 call verdict is emitted
+                 but flagged "behavioral_short_trace")
         → policy engine → final decision (ALLOW / ALERT / BLOCK / TERMINATE)
         → structured JSON security event
 ```
