@@ -118,19 +118,20 @@ class CortexPipeline:
             result.static_verdict = StaticVerdict.ERROR
             result.reason_codes.append("static_scan_exception")
 
-        # 6. gate: only ALLOW proceeds to behavioral
-        if result.static_verdict == StaticVerdict.ALLOW and api_calls_json_path is not None:
+        # 6. gate: behavioral runs for any static verdict that produced a
+        # usable score -- ALLOW, ALERT, or BLOCK -- when an API-call trace is
+        # supplied. A file scoring above STATIC_BLOCK_MIN now gets the SAME
+        # behavioral scrutiny as one scoring just below it: static BLOCK is
+        # interim-capped to ALERT in the policy engine (see
+        # policy_engine.decide()'s "INTERIM CAP" section), so skipping
+        # behavioral on BLOCK would give the higher-scoring file LESS
+        # scrutiny -- and behavioral MALICIOUS is the one signal that can
+        # still escalate it to TERMINATE. Only a static ERROR skips
+        # behavioral (no reliable static evidence to combine it with).
+        if (result.static_verdict in (StaticVerdict.ALLOW, StaticVerdict.ALERT, StaticVerdict.BLOCK)
+                and api_calls_json_path is not None):
             result.behavioral_score, result.behavioral_verdict = self._run_behavioral(api_calls_json_path)
-        elif result.static_verdict != StaticVerdict.ALLOW:
-            # per architecture: BLOCK short-circuits immediately; ALERT still
-            # "preserves alert and examines behavior" in the prose flow, but
-            # the decision table shows Alert+Behavioral only matters if
-            # MALICIOUS upgrades it to TERMINATE, so we still run behavioral
-            # for ALERT (not BLOCK) when data is supplied.
-            if result.static_verdict == StaticVerdict.ALERT and api_calls_json_path is not None:
-                result.behavioral_score, result.behavioral_verdict = self._run_behavioral(api_calls_json_path)
-            # BLOCK: never run behavioral, static block is always protected
-        # else: no api_calls_json_path supplied -> behavioral stays NOT_PROVIDED
+        # else: static ERROR, or no api_calls_json_path -> behavioral stays NOT_PROVIDED
 
         # 8. policy engine
         final, reasons = decide(result.static_verdict, result.behavioral_verdict, result.memory_verdict)
