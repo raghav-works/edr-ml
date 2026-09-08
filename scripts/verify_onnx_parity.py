@@ -49,16 +49,19 @@ def _onnx_run(onnx_path: str, X: np.ndarray) -> np.ndarray:
 
 
 def _report(name: str, py: np.ndarray, ox: np.ndarray, y: np.ndarray,
-            thresholds: dict[str, float]) -> None:
+            thresholds: dict[str, float]) -> dict:
+    """Log the parity report and return it as a dict (so tests can assert on it)."""
     err = np.abs(py - ox)
     logger.info("[%s] n=%d  max_abs_err=%.3e  mean_abs_err=%.3e  median_abs_err=%.3e",
                 name, len(py), err.max(), err.mean(), np.median(err))
     worst = int(np.argmax(err))
     logger.info("[%s]   worst row: py=%.8f onnx=%.8f (true label=%d)", name, py[worst], ox[worst], int(y[worst]))
+    flips_out: dict[str, dict] = {}
     for tname, thr in thresholds.items():
-        flips = int(((py >= thr) != (ox >= thr)).sum())
+        mask = (py >= thr) != (ox >= thr)
+        flips = int(mask.sum())
         # of the flips, how many are within 1e-6 of the threshold (pure tie-break)
-        near = int((np.abs(py - thr)[((py >= thr) != (ox >= thr))] < 1e-6).sum()) if flips else 0
+        near = int((np.abs(py - thr)[mask] < 1e-6).sum()) if flips else 0
         py_fpr = float((py[y == 0] >= thr).mean()) if (y == 0).any() else float("nan")
         ox_fpr = float((ox[y == 0] >= thr).mean()) if (y == 0).any() else float("nan")
         py_det = float((py[y == 1] >= thr).mean()) if (y == 1).any() else float("nan")
@@ -66,9 +69,18 @@ def _report(name: str, py: np.ndarray, ox: np.ndarray, y: np.ndarray,
         logger.info("[%s]   @ %-10s thr=%.10f : flips=%d (%d are threshold ties)  "
                     "FPR py=%.4f%% onnx=%.4f%%  det py=%.4f%% onnx=%.4f%%",
                     name, tname, thr, flips, near, py_fpr * 100, ox_fpr * 100, py_det * 100, ox_det * 100)
+        flips_out[tname] = {"flips": flips, "ties": near, "threshold": float(thr)}
+    return {
+        "name": name,
+        "n": int(len(py)),
+        "max_abs_err": float(err.max()),
+        "mean_abs_err": float(err.mean()),
+        "median_abs_err": float(np.median(err)),
+        "flips": flips_out,
+    }
 
 
-def check_static(static_n: int) -> None:
+def check_static(static_n: int = 50000) -> dict:
     from inference.policy_engine import STATIC_ALLOW_MAX, STATIC_BLOCK_MIN
     from models.static_lgbm import LGBMModel
 
@@ -91,10 +103,10 @@ def check_static(static_n: int) -> None:
     X, y = X[keep], y[keep]
     py = model.predict_proba(X)
     ox = _onnx_run(STATIC_ONNX, X)
-    _report("static", py, ox, y, {"ALLOW_MAX": STATIC_ALLOW_MAX, "BLOCK_MIN": STATIC_BLOCK_MIN})
+    return _report("static", py, ox, y, {"ALLOW_MAX": STATIC_ALLOW_MAX, "BLOCK_MIN": STATIC_BLOCK_MIN})
 
 
-def check_memory() -> None:
+def check_memory(limit: int | None = None) -> dict:
     from features.memory_features import add_derived_features, feature_matrix_columns
     from inference.policy_engine import MEMORY_MALICIOUS_MIN
     from models.memory_lgbm import MemoryLGBMModel
@@ -103,12 +115,14 @@ def check_memory() -> None:
     df = add_derived_features(pd.read_parquet("data/processed/memory_test.parquet"))
     cols = feature_matrix_columns(df)
     X = df[cols].to_numpy(np.float32); y = df["label"].to_numpy(np.int32)
+    if limit:
+        X, y = X[:limit], y[:limit]
     py = model.predict_proba(X)
     ox = _onnx_run(MEMORY_ONNX, X)
-    _report("memory", py, ox, y, {"MALICIOUS_MIN": MEMORY_MALICIOUS_MIN})
+    return _report("memory", py, ox, y, {"MALICIOUS_MIN": MEMORY_MALICIOUS_MIN})
 
 
-def check_network() -> None:
+def check_network(limit: int | None = None) -> dict:
     from data.download_network import FEATURE_COLUMNS
     from inference.policy_engine import NETWORK_MALICIOUS_MIN
     from models.network_lgbm import NetworkLGBMModel
@@ -116,9 +130,11 @@ def check_network() -> None:
     model = NetworkLGBMModel.load("data/models/cortex_network")
     df = pd.read_parquet("data/processed/network_test.parquet")
     X = df[FEATURE_COLUMNS].to_numpy(np.float32); y = df["label"].to_numpy(np.int32)
+    if limit:
+        X, y = X[:limit], y[:limit]
     py = model.predict_proba(X)
     ox = _onnx_run(NETWORK_ONNX, X)
-    _report("network", py, ox, y, {"MALICIOUS_MIN": NETWORK_MALICIOUS_MIN})
+    return _report("network", py, ox, y, {"MALICIOUS_MIN": NETWORK_MALICIOUS_MIN})
 
 
 def main() -> None:
