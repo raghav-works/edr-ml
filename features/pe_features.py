@@ -31,8 +31,10 @@ Feature groups (sum = 2568):
     authenticode       8    Authenticode signature summary
     pefilewarnings    88    fixed-vocabulary pefile parse-warning bag + count
 
-Requires: pefile, numpy, scikit-learn (FeatureHasher). Optional: signify (for
-Authenticode parsing) — degrades gracefully to zeros if unavailable.
+Requires: pefile, numpy, scikit-learn (FeatureHasher), and signify>=0.9,<0.10
+(Authenticode parsing). signify is NOT optional: without it the 8-dim
+authenticode group would zero out, skewing static scores on signed binaries,
+so PEFeatureExtractor() raises at construction if it is missing.
 """
 
 from __future__ import annotations
@@ -58,9 +60,22 @@ try:
 except ImportError:
     _PEFILE_AVAILABLE = False
 
+# signify 0.9.x renamed the PE entry point: the old `SignedPEFile` (used up
+# to ~0.8.x, which cortex-endpoint pins and monkey-patches) is now
+# `AuthenticodeFile`, opened via `AuthenticodeFile.from_stream(...)` and
+# iterated with `iter_signatures()` instead of `iter_signed_datas()`. We port
+# forward to the installed 0.9.x API rather than pinning back to 0.8.1 (that
+# version needs a CertificateStore.__getitem__ monkey-patch).
+#
+# If this import fails, _SIGNIFY_AVAILABLE stays False and PEFeatureExtractor()
+# raises at construction (see __init__) -- deliberately a HARD failure, not a
+# silent all-zeros authenticode group. Silent degradation here is a
+# train/serve skew that inflates static scores on signed binaries; it
+# happened once (against signify 0.9.2's rename) and went undetected until a
+# manual 5-file scan comparison against cortex-endpoint caught it. A future
+# signify rename must break loudly. (requirements.txt pins signify>=0.9,<0.10.)
 try:
-    from signify.authenticode import SignedPEFile
-    from signify import exceptions as signify_exceptions
+    from signify.authenticode import AuthenticodeFile
     _SIGNIFY_AVAILABLE = True
 except ImportError:
     _SIGNIFY_AVAILABLE = False
@@ -614,12 +629,16 @@ class AuthenticodeSignature(FeatureGroup):
         if pe is None or not _SIGNIFY_AVAILABLE:
             return raw
         try:
-            spe = SignedPEFile(io.BytesIO(bytez))
-            for sd in spe.iter_signed_datas():
+            af = AuthenticodeFile.from_stream(io.BytesIO(bytez))
+            # signify 0.9.x: iter_signatures() yields AuthenticodeSignature
+            # objects (0.8.x: iter_signed_datas() -> SignedData). Both expose
+            # .signer_info and .certificates; feature semantics below are
+            # unchanged from the 0.8.x version.
+            for sig in af.iter_signatures():
                 raw["num_certs"] += 1
-                if sd.signer_info.program_name is None:
+                if sig.signer_info.program_name is None:
                     raw["empty_program_name"] = 1
-                cs = sd.signer_info.countersigner
+                cs = sig.signer_info.countersigner
                 if cs is not None:
                     t = cs.signing_time.timestamp()
                     if t >= raw["latest_signing_time"]:
@@ -627,7 +646,7 @@ class AuthenticodeSignature(FeatureGroup):
                     raw["signing_time_diff"] = t - pe.FILE_HEADER.TimeDateStamp
                 else:
                     raw["no_countersigner"] = 1
-                certs = sd.certificates
+                certs = list(sig.certificates)
                 raw["chain_max_depth"] = max(raw["chain_max_depth"], len(certs))
                 for cert in certs[:-1]:
                     if cert.issuer == cert.subject:
@@ -705,6 +724,14 @@ class PEFeatureExtractor:
     def __init__(self) -> None:
         if not _PEFILE_AVAILABLE:
             raise ImportError("pefile is required: pip install pefile")
+        if not _SIGNIFY_AVAILABLE:
+            raise ImportError(
+                "signify>=0.9,<0.10 is required for the authenticode feature group "
+                "(this module targets the 0.9.x AuthenticodeFile API). A missing or "
+                "too-old signify would silently zero 8 features and skew every static "
+                "score on signed binaries -- failing hard instead of degrading. "
+                "pip install 'signify>=0.9,<0.10'"
+            )
         self._groups: List[FeatureGroup] = [
             GeneralFileInfo(), ByteHistogram(), ByteEntropyHistogram(), StringExtractor(),
             HeaderFileInfo(), SectionInfo(), ImportsInfo(), ExportsInfo(),
