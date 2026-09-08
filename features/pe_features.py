@@ -540,7 +540,17 @@ class ExportsInfo(FeatureGroup):
         if not raw:
             return np.zeros(self.dim, dtype=np.float32)
         h = FeatureHasher(128, input_type="string").transform([raw]).toarray()[0]
-        return np.hstack([len(h), h]).astype(np.float32)
+        # raw is the list of exported symbol names; the leading scalar is the
+        # export COUNT (matches ImportsInfo / RichHeader / PEFormatWarnings,
+        # which all prepend a real count). len(h) was always 128 -- the
+        # FeatureHasher width -- i.e. a dead constant feature slot.
+        # TODO(feature-parity test, README open item #1): the parity test
+        # MUST assert this slot (absolute index feature_2276) == len(export
+        # names) on BOTH the live-PE path here AND the EMBER2024 adapter path
+        # (features/ember2024_adapter.py). Correctness on the adapter side
+        # depends on EMBER2024's record "exports" field being a list of
+        # symbol-name strings -- confirm when the parquet is regenerated.
+        return np.hstack([len(raw), h]).astype(np.float32)
 
 
 class DataDirectories(FeatureGroup):
