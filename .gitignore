@@ -26,3 +26,9 @@ data/raw/
 *.meta
 *.pt
 *.onnx
+
+# Ad hoc code-transfer artifacts: a repo-snapshot archive, and the local
+# file scp creates when the "user@host" destination is given with no
+# trailing ":" (it then writes a local file literally named user@host).
+*.zip
+*@*.*.*.*
