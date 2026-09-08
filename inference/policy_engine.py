@@ -10,11 +10,52 @@ from __future__ import annotations
 
 import enum
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
+
+import yaml
 
 # ---------------------------------------------------------------------------
 # Thresholds
 # ---------------------------------------------------------------------------
+# config/thresholds.yaml is the SINGLE SOURCE OF TRUTH for every decision
+# threshold below. This module loads it at import time and fails loudly if
+# the file is missing, malformed, or missing a key -- a silently-wrong
+# threshold is exactly the failure class this project keeps hardening
+# against. The long comment on each constant documents how that value was
+# derived; the value itself lives only in the YAML, not here.
+_THRESHOLDS_PATH = Path(__file__).resolve().parents[1] / "config" / "thresholds.yaml"
+
+
+def _load_thresholds() -> dict:
+    try:
+        with open(_THRESHOLDS_PATH, encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            f"decision thresholds not found: {_THRESHOLDS_PATH}. config/thresholds.yaml is "
+            "the source of truth for policy_engine and must ship with the package."
+        ) from exc
+    except yaml.YAMLError as exc:
+        raise RuntimeError(f"malformed threshold file {_THRESHOLDS_PATH}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise RuntimeError(f"{_THRESHOLDS_PATH} did not parse to a mapping")
+    return data
+
+
+def _thr(data: dict, *path: str) -> float:
+    node: object = data
+    for key in path:
+        if not isinstance(node, dict) or key not in node:
+            raise RuntimeError(f"{_THRESHOLDS_PATH} is missing required key: {'.'.join(path)}")
+        node = node[key]
+    if isinstance(node, bool) or not isinstance(node, (int, float)):
+        raise RuntimeError(f"{_THRESHOLDS_PATH}:{'.'.join(path)} must be a number, got {node!r}")
+    return float(node)
+
+
+_THRESHOLDS = _load_thresholds()
+
 # Static thresholds re-derived from data/models/cortex_static (LightGBM,
 # trained on the deduplicated EMBER2024 PE-format train split) via
 # models.static_lgbm.find_threshold_for_fpr() against the calibrated
@@ -31,8 +72,8 @@ from typing import Optional
 # differ from the pre-fix ones (ALLOW was 0.6163460957, BLOCK 0.9950119117).
 # The old values must NOT be used with the recalibrated model: at the old
 # BLOCK value the recalibrated model blocks at only ~0.03% FPR / 86% det.
-STATIC_ALLOW_MAX = 0.5471026402140103   # score <  this -> ALLOW
-STATIC_BLOCK_MIN = 0.9798998555119341   # score >= this -> BLOCK   (between the two -> ALERT)
+STATIC_ALLOW_MAX = _thr(_THRESHOLDS, "static", "allow_below")        # score <  this -> ALLOW
+STATIC_BLOCK_MIN = _thr(_THRESHOLDS, "static", "block_at_or_above")  # score >= this -> BLOCK  (between the two -> ALERT)
 # INTERIM CAP (2026-09-08): a score >= STATIC_BLOCK_MIN still yields
 # StaticVerdict.BLOCK, but decide() demotes that to a final ALERT (not BLOCK)
 # -- 2/5 confirmed-benign real binaries still cross this line post-
@@ -66,7 +107,7 @@ STATIC_BLOCK_MIN = 0.9798998555119341   # score >= this -> BLOCK   (between the 
 # overlay for high-risk call combinations gets built, that's the more
 # targeted fix for this class of ambiguity -- not blanket threshold tuning
 # in response to a single hard example.
-BEHAVIORAL_MALICIOUS_MIN = 0.60      # score >= this -> MALICIOUS, else BENIGN
+BEHAVIORAL_MALICIOUS_MIN = _thr(_THRESHOLDS, "behavioral", "malicious_at_or_above")  # >= this -> MALICIOUS
 
 # Memory threshold -- re-derived against data/models/cortex_memory
 # (LightGBM + Platt calibration, trained on scripts/split_memory.py's
@@ -108,7 +149,7 @@ BEHAVIORAL_MALICIOUS_MIN = 0.60      # score >= this -> MALICIOUS, else BENIGN
 # the val+test sweep counts (55 benign FP at target_fpr=0.01), and the
 # held-out test metrics (FPR 1.13%, detection 100%) are all unchanged; only
 # the calibrated score scale moved. Pre-fix value was 0.0005358335957155212.
-MEMORY_MALICIOUS_MIN: Optional[float] = 0.0006464189644018
+MEMORY_MALICIOUS_MIN: Optional[float] = _thr(_THRESHOLDS, "memory", "malicious_at_or_above")
 
 # Network threshold -- re-derived against data/models/cortex_network
 # (LightGBM + Platt calibration, trained on scripts/split_network.py's
@@ -166,7 +207,7 @@ MEMORY_MALICIOUS_MIN: Optional[float] = 0.0006464189644018
 # 97.52%) are unchanged; only the calibrated score scale moved (this value
 # dropped a lot in absolute terms because the old near-step calibrator
 # pushed almost everything to ~0 or ~1). Pre-fix value was 0.9441855970306654.
-NETWORK_MALICIOUS_MIN: Optional[float] = 0.5883628015255921
+NETWORK_MALICIOUS_MIN: Optional[float] = _thr(_THRESHOLDS, "network", "malicious_at_or_above")
 
 # Emulation threshold -- derived, but for LOGGING / TELEMETRY ONLY. This is
 # the target_fpr=1% point from the val+test sweep against the trained e64
@@ -191,7 +232,7 @@ NETWORK_MALICIOUS_MIN: Optional[float] = 0.5883628015255921
 # different model (see the README's future-work note: engineered
 # behavioural-category features, or training data spanning more collection
 # dates -- not further hyperparameter tuning, which the ablation ruled out).
-EMULATION_MALICIOUS_MIN: Optional[float] = 0.999358594417572
+EMULATION_MALICIOUS_MIN: Optional[float] = _thr(_THRESHOLDS, "emulation", "malicious_at_or_above")
 
 
 class StaticVerdict(str, enum.Enum):

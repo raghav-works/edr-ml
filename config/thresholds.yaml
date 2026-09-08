@@ -1,4 +1,10 @@
-# Decision thresholds — must match inference/policy_engine.py constants.
+# Decision thresholds — SINGLE SOURCE OF TRUTH. inference/policy_engine.py
+# loads these at import time via _load_thresholds() and fails loudly if this
+# file is missing, malformed, or missing a key. Edit thresholds HERE, not in
+# Python. Every key below is required (static.allow_below,
+# static.block_at_or_above, behavioral/memory/network/emulation
+# .malicious_at_or_above); sequence.* and file.* are informational for now
+# (api_tokenizer / pipeline still hold their own constants).
 #
 # static.*, memory.*, network.* RE-DERIVED 2026-09-08 after the Platt-
 # calibrator fix (models/*_lgbm.py calibrators now fit on raw booster
