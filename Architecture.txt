@@ -38,12 +38,16 @@ the appendix:
                      fails to parse. Its MALICIOUS verdict is capped at
                      ALERT; it can never autonomously BLOCK or TERMINATE.
 
-  Cortex-Network     TRAINED AND THRESHOLDED, NOT YET WIRED. The policy
-                     engine (decide()) already accepts a network verdict
-                     and caps it at ALERT, but inference/pipeline.py's
-                     scan() has no network-feature input and no code path
-                     that calls the trained model. Today, network_verdict
-                     is always NOT_PROVIDED in a real scan call.
+  Cortex-Network     LIVE for pre-supplied features. scan() takes a
+                     network_features= vector (78-dim CICFlowMeter flow
+                     stats) and scores it via the trained model, exactly
+                     like memory_features. decide() caps a network MALICIOUS
+                     verdict at ALERT (never autonomous BLOCK/TERMINATE).
+                     If network_features is not passed -- or no network
+                     model is configured -- network_verdict is NOT_PROVIDED
+                     (neutral). No live traffic capture / CICFlowMeter
+                     pipeline exists in this repo; the caller produces the
+                     vector.
 
   Cortex-Emulation   TRAINED AND THRESHOLDED, TELEMETRY-ONLY, NOT WIRED.
                      Deliberately excluded from decide() by design (an
@@ -349,6 +353,10 @@ inference/policy_engine.py -- but neither is reachable from a real
 CortexPipeline.scan() call today:
 
   Cortex-Network (LightGBM + Platt, CSE-CIC-IDS2018 flow features):
+    STALE -- FLAG FOR DOCS PASS: as of 2026-09-08 scan() DOES take a
+    network_features= argument and score it (see the status summary at the
+    top of this file), and the threshold is now 0.5883628015255921 after
+    the calibration refit -- the two paragraphs below predate both changes.
     threshold 0.9441855970306654 -> MALICIOUS, capped at ALERT.
     decide() already has a network_verdict parameter and branch for it,
     but pipeline.scan() has no network-feature argument and never calls
