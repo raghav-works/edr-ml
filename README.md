@@ -1,7 +1,7 @@
 # cortex-ml — Static (LightGBM) + Behavioral (1D-CNN + Attention) reproduction
 
 Independent reimplementation, built to the architecture you specified
-(`Architecture.txt`): **sequential gating, no ensembling**. Static runs
+(`ARCHITECTURE.md`): **sequential gating, no ensembling**. Static runs
 first; a static **ALLOW, ALERT, or BLOCK** verdict lets a file proceed to
 behavioral analysis (only a static scan ERROR skips it). Static's BLOCK is
 currently interim-capped to a final ALERT (see `policy_engine.decide()`'s

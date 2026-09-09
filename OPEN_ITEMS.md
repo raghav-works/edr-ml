@@ -64,5 +64,3 @@ done (see git log); this is what remains.
 - `README.md` — calibration-saturation section (~lines 176/852) still
   describes pre-fix behaviour; head/flow already updated.
 - `PROJECT_HISTORY_REPORT.md` — uncommitted edits pending.
-- `Architecture.txt` §10 — carries a `STALE` flag; the Cortex-Network
-  paragraph predates the item-6 wiring and the calibration refit.

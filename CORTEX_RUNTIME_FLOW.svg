@@ -1,0 +1,116 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1080" viewBox="0 0 1600 1080" role="img" aria-labelledby="title desc">
+  <title id="title">Cortex-ML runtime decision flow</title>
+  <desc id="desc">A flow diagram showing optional memory and network scoring, PE static analysis, optional API behavioral analysis, the policy engine, and final security event.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto"><path d="M0,0 L10,4 L0,8 Z" fill="#64748b"/></marker>
+    <style>
+      text { font-family: Arial, Helvetica, sans-serif; fill: #172033; }
+      .title { font-size: 30px; font-weight: 700; }
+      .subtitle { font-size: 16px; fill: #526176; }
+      .label { font-size: 16px; font-weight: 700; }
+      .small { font-size: 14px; }
+      .box { stroke-width: 2; rx: 12; ry: 12; }
+      .input { fill: #eef5ff; stroke: #3b82f6; }
+      .process { fill: #f8fafc; stroke: #94a3b8; }
+      .model { fill: #f3e8ff; stroke: #8b5cf6; }
+      .decision { fill: #fff8dd; stroke: #d97706; }
+      .status { fill: #effdf5; stroke: #16a34a; }
+      .error { fill: #fff1f2; stroke: #e11d48; }
+      .policy { fill: #e8f5ff; stroke: #0284c7; }
+      .final { fill: #eefbf2; stroke: #15803d; }
+      .line { fill: none; stroke: #64748b; stroke-width: 2.5; marker-end: url(#arrow); }
+      .dashed { fill: none; stroke: #64748b; stroke-width: 2.5; stroke-dasharray: 7 6; marker-end: url(#arrow); }
+    </style>
+  </defs>
+
+  <rect width="1600" height="1080" fill="#ffffff"/>
+  <text x="70" y="60" class="title">Cortex-ML: Runtime Scan and Decision Flow</text>
+  <text x="70" y="88" class="subtitle">Signals are scored independently. The policy engine combines verdicts by priority; it never averages scores.</text>
+
+  <rect x="70" y="135" width="270" height="68" class="box input"/>
+  <text x="205" y="164" class="label" text-anchor="middle">Start scan</text>
+  <text x="205" y="186" class="small" text-anchor="middle">file path + optional evidence</text>
+
+  <rect x="70" y="275" width="270" height="68" class="box input"/>
+  <text x="205" y="304" class="label" text-anchor="middle">Optional memory vector</text>
+  <text x="205" y="326" class="small" text-anchor="middle">62 values supplied by caller</text>
+  <rect x="410" y="275" width="270" height="68" class="box model"/>
+  <text x="545" y="304" class="label" text-anchor="middle">Memory LightGBM</text>
+  <text x="545" y="326" class="small" text-anchor="middle">BENIGN / MALICIOUS / ERROR</text>
+
+  <rect x="70" y="390" width="270" height="68" class="box input"/>
+  <text x="205" y="419" class="label" text-anchor="middle">Optional network vector</text>
+  <text x="205" y="441" class="small" text-anchor="middle">78 values supplied by caller</text>
+  <rect x="410" y="390" width="270" height="68" class="box model"/>
+  <text x="545" y="419" class="label" text-anchor="middle">Network LightGBM</text>
+  <text x="545" y="441" class="small" text-anchor="middle">BENIGN / MALICIOUS / ERROR</text>
+
+  <rect x="70" y="525" width="270" height="68" class="box process"/>
+  <text x="205" y="554" class="label" text-anchor="middle">Validate file path</text>
+  <text x="205" y="576" class="small" text-anchor="middle">file, readable, maximum 100 MiB</text>
+  <polygon points="545,515 680,559 545,603 410,559" fill="#fff8dd" stroke="#d97706" stroke-width="2"/>
+  <text x="545" y="554" class="label" text-anchor="middle">Valid path?</text>
+  <text x="545" y="576" class="small" text-anchor="middle">and valid PE executable</text>
+  <rect x="750" y="525" width="270" height="68" class="box error"/>
+  <text x="885" y="554" class="label" text-anchor="middle">Static ERROR</text>
+  <text x="885" y="576" class="small" text-anchor="middle">invalid path, non-PE, or failure</text>
+
+  <rect x="410" y="665" width="270" height="68" class="box process"/>
+  <text x="545" y="694" class="label" text-anchor="middle">Extract PE features</text>
+  <text x="545" y="716" class="small" text-anchor="middle">SHA-256 + 2,568 float32 values</text>
+  <rect x="750" y="665" width="270" height="68" class="box model"/>
+  <text x="885" y="694" class="label" text-anchor="middle">Static LightGBM</text>
+  <text x="885" y="716" class="small" text-anchor="middle">ALLOW / ALERT / BLOCK</text>
+  <polygon points="1215,655 1350,699 1215,743 1080,699" fill="#fff8dd" stroke="#d97706" stroke-width="2"/>
+  <text x="1215" y="694" class="label" text-anchor="middle">API trace</text>
+  <text x="1215" y="716" class="small" text-anchor="middle">available?</text>
+
+  <rect x="1080" y="805" width="270" height="68" class="box process"/>
+  <text x="1215" y="834" class="label" text-anchor="middle">Tokenize API calls</text>
+  <text x="1215" y="856" class="small" text-anchor="middle">&lt;10: PENDING; otherwise first 100</text>
+  <rect x="1080" y="915" width="270" height="68" class="box model"/>
+  <text x="1215" y="944" class="label" text-anchor="middle">Behavioral CNN + attention</text>
+  <text x="1215" y="966" class="small" text-anchor="middle">BENIGN / MALICIOUS</text>
+
+  <rect x="750" y="805" width="270" height="178" class="box policy"/>
+  <text x="885" y="838" class="label" text-anchor="middle">Policy engine</text>
+  <text x="885" y="866" class="small" text-anchor="middle">1. Behavioral malicious → TERMINATE</text>
+  <text x="885" y="889" class="small" text-anchor="middle">2. Memory/network malicious → ALERT</text>
+  <text x="885" y="912" class="small" text-anchor="middle">3. Static alert/block → ALERT</text>
+  <text x="885" y="935" class="small" text-anchor="middle">4. Any active-signal error → ALERT</text>
+  <text x="885" y="958" class="small" text-anchor="middle">5. Otherwise → ALLOW</text>
+
+  <rect x="1420" y="805" width="140" height="178" class="box final"/>
+  <text x="1490" y="842" class="label" text-anchor="middle">Security</text>
+  <text x="1490" y="864" class="label" text-anchor="middle">event</text>
+  <text x="1490" y="902" class="small" text-anchor="middle">scores</text>
+  <text x="1490" y="924" class="small" text-anchor="middle">verdicts</text>
+  <text x="1490" y="946" class="small" text-anchor="middle">reasons</text>
+  <text x="1490" y="968" class="small" text-anchor="middle">timestamp</text>
+
+  <path d="M205,203 L205,275" class="line"/>
+  <path d="M340,309 L410,309" class="line"/>
+  <path d="M205,203 L205,390" class="line"/>
+  <path d="M340,424 L410,424" class="line"/>
+  <path d="M680,309 L720,309 L720,830 L750,830" class="line"/>
+  <path d="M680,424 L715,424 L715,858 L750,858" class="line"/>
+
+  <path d="M205,203 L205,525" class="line"/>
+  <path d="M340,559 L410,559" class="line"/>
+  <path d="M680,559 L750,559" class="line"/>
+  <text x="707" y="545" class="small">no</text>
+  <path d="M545,603 L545,665" class="line"/>
+  <text x="560" y="642" class="small">yes</text>
+  <path d="M680,699 L750,699" class="line"/>
+  <path d="M1020,699 L1080,699" class="line"/>
+  <path d="M1215,743 L1215,805" class="line"/>
+  <text x="1231" y="780" class="small">yes</text>
+  <path d="M1350,699 L1390,699 L1390,830 L1020,830" class="dashed"/>
+  <text x="1370" y="686" class="small">no: NOT_PROVIDED</text>
+  <path d="M1020,559 L1050,559 L1050,858 L1020,858" class="line"/>
+  <path d="M1020,699 L1050,699 L1050,886 L1020,886" class="line"/>
+  <path d="M1215,873 L1215,915" class="line"/>
+  <path d="M1350,949 L1385,949 L1385,900 L1020,900" class="line"/>
+  <path d="M1020,894 L1420,894" class="line"/>
+</svg>
+
