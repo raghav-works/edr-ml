@@ -2,6 +2,8 @@
 
 This describes the code that runs today. Cortex-ML is a malware-analysis decision system with four active signals: static PE-file analysis, behavioral API-trace analysis, and optional memory and network analysis. A fifth signal, emulation, is trained and evaluated but deliberately does not affect a runtime decision.
 
+Every signal's model architecture was chosen against this project's own data rather than inherited from the reference design it reproduces. A reference choice was made by other people, for their own reasons, on data that may differ, so each signal was re-checked against real local data and given the architecture that data justified: for static and behavioral that matched the reference design, for memory, network, and emulation it did not, each for a specific reason recorded under the signal below.
+
 ## In one sentence
 
 The caller gives `CortexPipeline.scan()` a file path and may also give it an API-call JSON trace, a 62-value memory vector, and a 78-value network vector. Cortex scores available evidence, converts each score to a verdict from `config/thresholds.yaml`, and applies a priority policy—not an ensemble or averaged score—to return an auditable decision.
@@ -151,13 +153,19 @@ Offline data contains 55 VolMemLyzer columns. `features/memory_features.py` adds
 
 At runtime the caller supplies an already ordered 62-value vector. `MemoryLGBMModel` emits `MALICIOUS` at `>= 0.0006464189644018`, else `BENIGN`. A supplied vector with no configured model remains `NOT_PROVIDED`; a scoring exception becomes `ERROR`.
 
+Architecture choice: the reference design used a deep residual MLP for this signal; Cortex-Memory uses LightGBM. The features are ~55–70 engineered numeric statistics — tabular data, the same class as Cortex-Static — and at roughly 58K rows a deep network needs far more data to beat gradient-boosted trees on that kind of input, so the MLP would add complexity for no expected gain. Reusing the already-working Cortex-Static LightGBM pipeline also kept a second model architecture off the debugging surface.
+
 ### Cortex-Network: supplied flow features
 
 `data/download_network.py` defines the canonical 78 CICFlowMeter-compatible columns after removing identity-like fields such as flow ID, source IP, source port, and destination IP. Runtime does not derive them; the caller supplies the ordered vector. `NetworkLGBMModel` emits `MALICIOUS` at `>= 0.5883628015255921`, else `BENIGN`.
 
+Architecture choice: the reference design used an autoencoder + classifier hybrid for this signal; Cortex-Network uses LightGBM, for two reasons found before any code was written. The reference repository's own checked-in metrics file reported `anomaly_auc: 0.062` for that autoencoder — a value that low is a visible sign the design was not working even in the implementation it came from. And the flow features are 78 engineered per-flow statistics, i.e. tabular, so LightGBM is the simpler, better-justified default; the autoencoder hybrid stays a legitimate future capability, not a starting point.
+
 ### Cortex-Emulation: offline/report-only
 
 The Speakeasy/Quo Vadis loader preserves the authors’ time-separated split, keeps only `module_entry` traces for modelling, collapses exact duplicate API sequences inside each authored partition, and tokenizes first 500 calls. Its CNN-attention model is similar to behavioral but has a separate vocabulary and 500-step input.
+
+Architecture choice: the reference design used a GRU over opcode and memory-access-trace data; Cortex-Emulation reuses Cortex-Behavioral's 1D-CNN + attention family instead. Inspecting the real dataset showed the emulator had been run with `"memory_tracing": false`, so the opcode-level and memory-access-pattern traces that GRU was built to consume are simply not present — the only signal in the data is API-call name sequences, the same problem Cortex-Behavioral already handles.
 
 It has a threshold and `EmulationVerdict` helper, but `pipeline.scan()`, `ScanResult`, and `decide()` do not use it. It is telemetry/offline evaluation only because observed temporal concept drift makes it unsuitable as a policy input.
 
