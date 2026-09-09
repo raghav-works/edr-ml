@@ -1,0 +1,88 @@
+Cortex-ML — full val + test evaluation of every trained model
+at its deployed operating threshold(s) from config/thresholds.yaml.
+
+Generated : 2026-09-08 10:31:09Z
+Command   : python -m scripts.evaluate_all_models
+Git rev   : 9153956  (branch master)
+Read-only : no model / threshold / parquet was written.
+
+Static val = 10% seed=42 slice re-derived from ember2024_train.parquet;
+static test = ember2024_test.parquet. All other splits are the committed
+*_val.parquet / *_test.parquet files. See scripts/evaluate_all_models.py
+module docstring for the 3-way static readout and the behavioral bands.
+
+========================================================================
+
+==============================================================================
+1. CORTEX-STATIC  (data/models/cortex_static.lgbm)
+   STATIC_ALLOW_MAX = 0.5471026402140103
+   STATIC_BLOCK_MIN = 0.9798998555119341
+------------------------------------------------------------------------------
+ split=val  (source: data/processed/ember2024_train.parquet)
+   3-way confusion (rows = true label, cols = static verdict):
+     true\pred       ALLOW    ALERT    BLOCK          n
+     benign         116073      863       65     117001
+     malicious        1426     6235   109338     116999
+   binary metrics:
+  @ ALLOW boundary (not-ALLOW=+) TN=116073 FP=928 FN=1426 TP=115573 | P=0.9920 R=0.9878 F1=0.9899 FPR=0.0079 AUC=0.999319 | n=234000 (117001 benign / 116999 malicious)
+  @ BLOCK boundary (BLOCK=+)   TN=116936 FP=65 FN=7661 TP=109338 | P=0.9994 R=0.9345 F1=0.9659 FPR=0.0006 AUC=0.999319 | n=234000 (117001 benign / 116999 malicious)
+   AUC-ROC (threshold-independent): 0.999319
+------------------------------------------------------------------------------
+ split=test  (source: data/processed/ember2024_test.parquet)
+   3-way confusion (rows = true label, cols = static verdict):
+     true\pred       ALLOW    ALERT    BLOCK          n
+     benign         267241     2430      269     269940
+     malicious        5332    17131   247537     270000
+   binary metrics:
+  @ ALLOW boundary (not-ALLOW=+) TN=267241 FP=2699 FN=5332 TP=264668 | P=0.9899 R=0.9803 F1=0.9851 FPR=0.0100 AUC=0.998841 | n=539940 (269940 benign / 270000 malicious)
+  @ BLOCK boundary (BLOCK=+)   TN=269671 FP=269 FN=22463 TP=247537 | P=0.9989 R=0.9168 F1=0.9561 FPR=0.0010 AUC=0.998841 | n=539940 (269940 benign / 270000 malicious)
+   AUC-ROC (threshold-independent): 0.998841
+==============================================================================
+2. CORTEX-MEMORY  (data/models/cortex_memory.lgbm)
+   MEMORY_MALICIOUS_MIN = 0.0006464189644018  (verdict capped at ALERT in decide())
+------------------------------------------------------------------------------
+ split=val  (data/processed/memory_val.parquet)
+  @ MEMORY_MALICIOUS_MIN       TN=2908 FP=22 FN=0 TP=3000 | P=0.9927 R=1.0000 F1=0.9963 FPR=0.0075 AUC=0.999999 | n=5930 (2930 benign / 3000 malicious)
+------------------------------------------------------------------------------
+ split=test  (data/processed/memory_test.parquet)
+  @ MEMORY_MALICIOUS_MIN       TN=2898 FP=32 FN=0 TP=3000 | P=0.9894 R=1.0000 F1=0.9947 FPR=0.0109 AUC=1.000000 | n=5930 (2930 benign / 3000 malicious)
+==============================================================================
+3. CORTEX-NETWORK  (data/models/cortex_network.lgbm)
+   NETWORK_MALICIOUS_MIN = 0.5883628015255921  (verdict capped at ALERT in decide())
+------------------------------------------------------------------------------
+ split=val  (data/processed/network_val.parquet)
+  @ NETWORK_MALICIOUS_MIN      TN=160714 FP=150 FN=1290 TP=49543 | P=0.9970 R=0.9746 F1=0.9857 FPR=0.0009 AUC=0.997084 | n=211697 (160864 benign / 50833 malicious)
+------------------------------------------------------------------------------
+ split=test  (data/processed/network_test.parquet)
+  @ NETWORK_MALICIOUS_MIN      TN=160711 FP=158 FN=1300 TP=51048 | P=0.9969 R=0.9752 F1=0.9859 FPR=0.0010 AUC=0.997166 | n=213217 (160869 benign / 52348 malicious)
+==============================================================================
+4. CORTEX-BEHAVIORAL  (data/models/cortex_behavioral_best.pt)
+   BEHAVIORAL_MALICIOUS_MIN = 0.6000000000000000
+   sequence-length bands (raw api_calls length): too_short <10 | short 10-99 | ok+truncated >=100
+------------------------------------------------------------------------------
+ split=val  (data/processed/behavioral_val.parquet)   n=918
+  band=too_short  [model-raw; deployment floors this band to PENDING] TN=4 FP=0 FN=3 TP=0 | P=0.0000 R=0.0000 F1=0.0000 FPR=0.0000 AUC=1.000000 | n=7 (4 benign / 3 malicious)
+  band=short                   TN=117 FP=0 FN=17 TP=175 | P=1.0000 R=0.9115 F1=0.9537 FPR=0.0000 AUC=0.983040 | n=309 (117 benign / 192 malicious)
+  band=ok+truncated            TN=15 FP=1 FN=3 TP=583 | P=0.9983 R=0.9949 F1=0.9966 FPR=0.0625 AUC=0.997760 | n=602 (16 benign / 586 malicious)
+   ---
+  TOTAL (deployment: short+ok) TN=132 FP=1 FN=20 TP=758 | P=0.9987 R=0.9743 F1=0.9863 FPR=0.0075 AUC=0.994424 | n=911 (133 benign / 778 malicious)
+  TOTAL (all rows, model-raw)  TN=136 FP=1 FN=23 TP=758 | P=0.9987 R=0.9706 F1=0.9844 FPR=0.0073 AUC=0.994290 | n=918 (137 benign / 781 malicious)
+------------------------------------------------------------------------------
+ split=test  (data/processed/behavioral_test.parquet)   n=917
+  band=too_short  [model-raw; deployment floors this band to PENDING] TN=11 FP=0 FN=4 TP=0 | P=0.0000 R=0.0000 F1=0.0000 FPR=0.0000 AUC=0.659091 | n=15 (11 benign / 4 malicious)
+  band=short                   TN=107 FP=0 FN=9 TP=175 | P=1.0000 R=0.9511 F1=0.9749 FPR=0.0000 AUC=0.997054 | n=291 (107 benign / 184 malicious)
+  band=ok+truncated            TN=19 FP=0 FN=2 TP=590 | P=1.0000 R=0.9966 F1=0.9983 FPR=0.0000 AUC=0.999200 | n=611 (19 benign / 592 malicious)
+   ---
+  TOTAL (deployment: short+ok) TN=126 FP=0 FN=11 TP=765 | P=1.0000 R=0.9858 F1=0.9929 FPR=0.0000 AUC=0.998732 | n=902 (126 benign / 776 malicious)
+  TOTAL (all rows, model-raw)  TN=137 FP=0 FN=15 TP=765 | P=1.0000 R=0.9808 F1=0.9903 FPR=0.0000 AUC=0.997324 | n=917 (137 benign / 780 malicious)
+==============================================================================
+5. CORTEX-EMULATION  (data/models/cortex_emulation_best.pt)   *** REPORT-ONLY / NOT IN ANY LIVE DECISION PATH ***
+   EMULATION_MALICIOUS_MIN = 0.9993585944175720  (telemetry EmulationVerdict only; never reaches decide())
+------------------------------------------------------------------------------
+ split=val  (data/processed/emulation_val.parquet)
+  @ EMULATION_MALICIOUS_MIN    TN=440 FP=10 FN=66 TP=159 | P=0.9408 R=0.7067 F1=0.8071 FPR=0.0222 AUC=0.949472 | n=675 (450 benign / 225 malicious)
+------------------------------------------------------------------------------
+ split=test  (data/processed/emulation_test.parquet)
+  @ EMULATION_MALICIOUS_MIN    TN=1923 FP=13 FN=327 TP=232 | P=0.9469 R=0.4150 F1=0.5771 FPR=0.0067 AUC=0.873724 | n=2495 (1936 benign / 559 malicious)
+==============================================================================
+done. read-only run -- no model / threshold / parquet was written.
