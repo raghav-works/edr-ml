@@ -6,14 +6,25 @@
 # .malicious_at_or_above); sequence.* and file.* are informational for now
 # (api_tokenizer / pipeline still hold their own constants).
 #
-# static.*, memory.*, network.* RE-DERIVED 2026-09-08 after the Platt-
-# calibrator fix (models/*_lgbm.py calibrators now fit on raw booster
-# margins, not sigmoid probabilities; ONNX export reconstructs the margin
-# in-graph). Boosters are unchanged, so every AUC and every operating point
-# (FPR/detection at target FPR) is unchanged -- only the calibrated score
-# scale moved, so the raw values below differ from the pre-fix ones. See the
-# per-constant comments in inference/policy_engine.py for the pre-fix values
-# and why the old ones must not be reused with the recalibrated models.
+# static.* RE-DERIVED 2026-09-08 after the Platt-calibrator fix
+# (models/*_lgbm.py calibrators fit on raw booster margins, not sigmoid
+# probabilities; ONNX export reconstructs the margin in-graph). The static
+# booster is unchanged there, so its AUC and operating points are unchanged
+# -- only the calibrated score scale moved.
+#
+# memory.* and network.* RE-DERIVED 2026-09-10 by the split-discipline
+# retrain in OPEN_ITEMS.md's "retrain cluster" section (PDF review items 2
+# and 3). Those two models were retrained on a new 4-way split with a
+# dedicated `cal` split: the Platt calibrator is fit on `cal` (held out of
+# the booster fit AND early stopping, not the val split), and the operating
+# point below is derived on `cal` alone -- `test` is untouched until the
+# final scripts/evaluate_all_models.py run. Their boosters, AUCs and
+# operating points all changed. static.* still awaits the same treatment
+# (its own later session: EMBER2024 parquet regen + retrain).
+#
+# See the per-constant comments in inference/policy_engine.py for every
+# superseded value and why a calibrated score scale is never portable
+# between calibrators.
 #
 # static.*: re-derived against data/models/cortex_static (LightGBM trained
 # on the deduplicated EMBER2024 PE-format train split, 2.34M rows) via
@@ -54,42 +65,58 @@
 # targeted fix for this class of ambiguity -- not blanket threshold tuning
 # in response to a single hard example.
 #
-# memory.*: re-derived against data/models/cortex_memory (LightGBM +
-# Platt calibration, trained on scripts/split_memory.py's group-aware
-# CIC-MalMem-2022 split) via models.memory_lgbm.find_threshold_for_fpr() at
-# target_fpr=0.01 on the calibrated val+test-combined probabilities (11,860
-# rows, 5,860 benign -- healthy enough to support a precise FPR target,
-# unlike behavioral's 274). Test-set metrics at this threshold: AUC-ROC=1.0,
-# precision=0.9891, recall=1.0, F1=0.9945, FPR=1.13%. These numbers are
-# internally valid on CIC-MalMem-2022 but likely optimistic for production:
-# 22 of the model's 62 features individually exceed 0.95 AUC on their own
-# (confirmed on held-out test), consistent with CIC-MalMem-2022's own
-# documented single-VM benign collection methodology (every benign sample
-# is a repeated capture of one baseline Windows 10 VM) rather than proof of
-# real injected-process detection. Full sweep table and evidence in the
-# README's "Training results and the separability finding" section.
-# malicious_at_or_above is used only to compute MemoryVerdict -- unlike
-# static/behavioral, that verdict is policy-capped at ALERT regardless of
-# score (inference/policy_engine.py::decide()), never BLOCK/TERMINATE,
-# pending real-world validation beyond this single-VM-benign dataset.
+# memory.*: re-derived 2026-09-10 against a retrained data/models/cortex_memory
+# (LightGBM + Platt calibration) on the new 4-way split from
+# scripts/split_memory.py --cal-frac 0.2 (34,949 train / 5,930 val / 11,787
+# cal / 5,930 test). Calibrator fit on `cal`; operating point from
+# models.memory_lgbm.find_threshold_for_fpr() at target_fpr=0.01 on the
+# calibrated `cal` probabilities alone (11,787 rows, 5,860 benign); `test`
+# not read during training or threshold selection. Result: threshold
+# 0.0024964628, actual FPR 0.9556% (56/5,860 benign FP), detection_rate
+# 0.9993 on cal -- the honest number; the old val+test derivation reported
+# recall 1.0000 at this target, and that ~0.1 pp is the removed optimism.
+# Same target_fpr choice as before, kept rather than re-picked from the new
+# numbers (56 benign FP is well-supported; detection barely moves at looser
+# targets). Held-out test metrics regenerated in EVAL_ALL_MODELS_RESULTS.txt.
 #
-# network.*: re-derived against data/models/cortex_network (LightGBM +
-# Platt calibration, trained on scripts/split_network.py's leakage-checked,
-# ambiguous-group-excluded CSE-CIC-IDS2018 split) via target_fpr=0.001 on
-# the calibrated val+test-combined probabilities (424,914 rows, 321,733
-# benign -- far more statistical power than memory's or behavioral's).
-# Test-set metrics: AUC-ROC=0.9972, precision=0.9969, recall=0.9752,
-# F1=0.9859, FPR=0.098%. Like memory, malicious_at_or_above is policy-capped
-# at ALERT, never BLOCK/TERMINATE -- but for two independent, evidence-
-# backed reasons: (a) Infiltration detection is only 10.75% on held-out
-# test, a documented CICFlowMeter-feature-representation ceiling (not an
-# under-training artifact -- 11,463 train rows), so Network structurally
-# can't be trusted alone for slow/low-volume attacks; (b) models reported
-# "nearly perfect" on CSE-CIC-IDS2018 -- which this one is -- have been
-# independently shown to degrade toward random performance on external
-# traffic. Full derivation, per-attack-type table, and both dataset-level
-# caveats (this one plus ~7.5% documented label noise) in the README's
-# Cortex-Network section.
+# Still internally valid on CIC-MalMem-2022 but likely optimistic for
+# production, for the documented single-VM-benign reason: every benign
+# sample is a repeated capture of one baseline Windows 10 VM, and a large
+# fraction of features are individually near-separating on this data (the
+# prior pass measured 22 of 62 above 0.95 AUC -- a dataset property, not a
+# per-model artifact; README's "Training results and the separability
+# finding" section is the reference). malicious_at_or_above only computes
+# MemoryVerdict, and that verdict is policy-capped at ALERT
+# (inference/policy_engine.py::decide()), never BLOCK/TERMINATE: the split-
+# discipline retrain fixes calibration/threshold honesty, not feature
+# fidelity, so the cap stays.
+#
+# network.*: re-derived 2026-09-10 against a retrained data/models/cortex_network
+# (LightGBM + Platt calibration) on the new 4-way split from
+# scripts/split_network.py --cal-frac 0.1 (1,331,042 train / 211,697 val /
+# 195,715 cal / 213,217 test). Calibrator fit on `cal`; operating point at
+# target_fpr=0.001 on the calibrated `cal` probabilities alone (195,715
+# rows, 160,863 benign -- one FP moves observed FPR by ~0.0006%); `test` not
+# read during training or threshold selection. Result: threshold
+# 0.6672636218, actual FPR 0.0988% (159/160,863 benign FP), detection_rate
+# 0.9626 on cal. The old val+test derivation reported held-out recall
+# 0.9752; that ~1.3 pp gap is the removed calibration/threshold optimism,
+# not a regression. Same target_fpr choice as before. Single-feature-AUC
+# sweep on train and cal: 0/78 features above 0.95 (max ~0.77) -- no fixed-
+# testbed shortcut. Held-out test metrics regenerated in
+# EVAL_ALL_MODELS_RESULTS.txt.
+#
+# Like memory, malicious_at_or_above only computes NetworkVerdict, and that
+# verdict is policy-capped at ALERT, never BLOCK/TERMINATE -- for two
+# independent, evidence-backed reasons unaffected by the retrain (both are
+# dataset/representation properties, not calibration artifacts): (a)
+# Infiltration attacks lack the flow-statistics signature CICFlowMeter
+# captures -- a representation ceiling (~10.75% detection on that class in
+# the prior test pass, at n_train=11,463, i.e. not under-training); (b)
+# models "nearly perfect" on CSE-CIC-IDS2018 -- which this one is -- degrade
+# toward random on external traffic. Per-attack-type table now in
+# scripts/evaluate_all_models.py's output; that plus ~7.5% documented label
+# noise in the README's Cortex-Network section.
 
 static:
   allow_below: 0.5471026402140103      # score <  this -> ALLOW   (pre-calibration-fix: 0.6163460957)
@@ -99,10 +126,10 @@ behavioral:
   malicious_at_or_above: 0.60  # score >= this -> MALICIOUS, else BENIGN
 
 memory:
-  malicious_at_or_above: 0.0006464189644018  # score >= this -> MALICIOUS, else BENIGN (capped at ALERT, never BLOCK/TERMINATE)  (pre-fix: 0.0005358335957155212)
+  malicious_at_or_above: 0.0024964628  # score >= this -> MALICIOUS, else BENIGN (capped at ALERT, never BLOCK/TERMINATE). Derived 2026-09-10 on the new cal split, target_fpr=0.01 (56/5,860 benign FP, detection 0.9993). Superseded: 0.0006464189644018, 0.0005358335957155212
 
 network:
-  malicious_at_or_above: 0.5883628015255921  # score >= this -> MALICIOUS, else BENIGN (capped at ALERT, never BLOCK/TERMINATE)  (pre-fix: 0.9441855970306654)
+  malicious_at_or_above: 0.6672636218  # score >= this -> MALICIOUS, else BENIGN (capped at ALERT, never BLOCK/TERMINATE). Derived 2026-09-10 on the new cal split, target_fpr=0.001 (159/160,863 benign FP, detection 0.9626). Superseded: 0.5883628015255921, 0.9441855970306654
 
 # emulation.*: LOGGING / TELEMETRY ONLY -- not a policy input. target_fpr=1%
 # point from the val+test sweep against data/models/cortex_emulation_best.pt

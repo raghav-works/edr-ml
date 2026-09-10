@@ -109,104 +109,105 @@ STATIC_BLOCK_MIN = _thr(_THRESHOLDS, "static", "block_at_or_above")  # score >= 
 # in response to a single hard example.
 BEHAVIORAL_MALICIOUS_MIN = _thr(_THRESHOLDS, "behavioral", "malicious_at_or_above")  # >= this -> MALICIOUS
 
-# Memory threshold -- re-derived against data/models/cortex_memory
-# (LightGBM + Platt calibration, trained on scripts/split_memory.py's
-# group-aware, leakage-checked CIC-MalMem-2022 split: 46,736 train / 5,930
-# val / 5,930 test) via models.memory_lgbm.find_threshold_for_fpr() on the
-# calibrated probabilities from val+test COMBINED (11,860 rows, 5,860
-# benign -- combined rather than test alone for the same statistical-power
-# reason as BEHAVIORAL_MALICIOUS_MIN, though memory's benign count here is
-# far healthier than behavioral's 274: one false positive moves the
-# observed FPR by only ~0.017%). target_fpr=0.01 (1%): the best-supported
-# target among those tried (55 observed benign FPs on val+test, vs. only 5
-# at target_fpr=0.001 -- too few to trust) that also costs nothing in
-# recall (detection_rate is already 100% at this and every looser target
-# tried). Held-out test-set metrics at this threshold: AUC-ROC=1.0,
-# precision=0.9891, recall=1.0, F1=0.9945, FPR=1.13% (33/2,930 benign test
-# rows). Full sweep table and derivation is in the README.
+# Memory threshold -- RE-DERIVED 2026-09-10 by the split-discipline retrain
+# in OPEN_ITEMS.md's "retrain cluster" section (PDF review items 2 and 3).
+# data/models/cortex_memory was retrained on a new 4-way split
+# (scripts/split_memory.py --cal-frac 0.2: 34,949 train / 5,930 val / 11,787
+# cal / 5,930 test; val and test are byte-identical to the prior 3-way
+# split). The Platt calibrator is now fit on `cal` -- a split held out of
+# BOTH the booster fit and early stopping, not the val split -- and this
+# operating point is derived on `cal` alone via
+# models.memory_lgbm.find_threshold_for_fpr(); `test` was not read at any
+# point in training or threshold selection (it is consumed once, at the
+# end, by scripts/evaluate_all_models.py). This removes the item-2
+# calibration optimism (calibrator previously fit on the early-stopping val
+# split) and the item-3 threshold optimism (operating point previously
+# chosen on the same val+test pool it was then scored against).
 #
-# IMPORTANT -- these metrics are internally valid on CIC-MalMem-2022 but
-# likely optimistic for production, for a specific, diagnosed reason, not a
-# generic disclaimer: 22 of the model's 62 raw+derived features
-# individually exceed 0.95 AUC on their own (confirmed independently on
-# both train and the held-out test split -- e.g. handles.avg_handles_per_proc
-# is a tight 208-318 band for benign [std=17.5] vs. 71-33,784 for malware
-# [std=222.8]). This is consistent with CIC-MalMem-2022's own documented
-# collection methodology: every benign sample is a repeated capture of
-# "normal user behavior" on a single baseline Windows 10 VM, while
-# malicious samples span far more varied executions/environments. The
-# model may be learning "does this look like that one baseline VM," not
-# "is malicious behavior present" -- a distinction this dataset alone
-# cannot resolve. This is exactly why memory's authority stays capped at
-# ALERT below (see decide()'s docstring): this finding is a reason to KEEP
-# that cap, not a one-off caveat to note and move past. Real-world
-# validation would require memory captures from multiple genuinely
-# different (non-baseline, non-single-VM) benign machines -- not more rows
-# from this same dataset, and not a generic "may not generalize" hand-wave.
+# target_fpr=0.01 (1%) on cal -> threshold 0.0024964628, actual FPR 0.9556%
+# (56 / 5,860 benign FP), detection_rate 0.9993. Same target-FPR choice the
+# pre-fix derivation made, deliberately kept rather than re-picked from the
+# new numbers: 56 benign FP is well-supported (one FP moves observed FPR by
+# ~0.017%), detection is ~99.9% here and at every looser target, and
+# tighter targets (29 FP at 0.5%, 5 FP at 0.1%) are thinner evidence for
+# the same recall. The honest detection_rate is 0.9993, not the 1.0000 the
+# old val+test derivation reported -- the ~0.1 pp is the optimism the
+# split-discipline fix removes, not a regression. Held-out test metrics at
+# this threshold are regenerated in EVAL_ALL_MODELS_RESULTS.txt.
 #
-# RE-DERIVED 2026-09-08 after the Platt-calibrator fix (fit on raw booster
-# margins, not sigmoid probabilities). Booster unchanged -> AUC-ROC (1.0),
-# the val+test sweep counts (55 benign FP at target_fpr=0.01), and the
-# held-out test metrics (FPR 1.13%, detection 100%) are all unchanged; only
-# the calibrated score scale moved. Pre-fix value was 0.0005358335957155212.
+# IMPORTANT -- CIC-MalMem-2022 metrics are internally valid but likely
+# optimistic for production, for a specific, diagnosed reason: the dataset's
+# benign class is a repeated capture of "normal user behavior" on a single
+# baseline Windows 10 VM, while malicious samples span far more varied
+# executions. A large fraction of the model's features are individually
+# near-separating on this data (the prior pass measured 22 of 62 above 0.95
+# AUC on their own, on both train and held-out data -- a property of the
+# dataset, not of any one trained model; the README's separability table is
+# the reference). The model may be learning "does this look like that one
+# baseline VM," not "is malicious behavior present" -- a distinction this
+# dataset alone cannot resolve. This is exactly why memory's authority
+# stays capped at ALERT below (see decide()'s docstring): the split-
+# discipline retrain fixes calibration and threshold honesty, not feature
+# fidelity, so it is a reason to KEEP the cap, not lift it. Real-world
+# validation needs benign captures from multiple genuinely different
+# (non-baseline, non-single-VM) machines.
+#
+# Superseded values -- never reuse, each calibrated score scale is specific
+# to its calibrator: 0.0006464189644018 (2026-09-08 recalibration on the
+# old 3-way split), 0.0005358335957155212 (the pre-calibrator-fix value).
 MEMORY_MALICIOUS_MIN: Optional[float] = _thr(_THRESHOLDS, "memory", "malicious_at_or_above")
 
-# Network threshold -- re-derived against data/models/cortex_network
-# (LightGBM + Platt calibration, trained on scripts/split_network.py's
-# leakage-checked, ambiguous-group-excluded CSE-CIC-IDS2018 split:
-# 1,526,757 train / 211,697 val / 213,217 test) via
-# models.network_lgbm.find_threshold_for_fpr() at target_fpr=0.001 on the
-# calibrated val+test-combined probabilities (424,914 rows, 321,733 benign
-# -- far more statistical power than memory's 5,860 or behavioral's 274;
-# one false positive here moves the observed FPR by only ~0.0003%). Held-out
-# test-set metrics at this threshold: AUC-ROC=0.9972, precision=0.9969,
-# recall=0.9752, F1=0.9859, FPR=0.098%. A single-feature-AUC sweep (the
-# same check that caught Cortex-Memory's single-VM shortcut) found nothing
-# suspicious here: 0 of 78 features exceed 0.95 AUC individually, on either
-# train or held-out test -- the model's performance reflects genuine
-# multi-feature pattern learning, not a fixed-testbed artifact, despite
-# CSE-CIC-IDS2018 also being a fixed-testbed capture.
+# Network threshold -- RE-DERIVED 2026-09-10 by the split-discipline retrain
+# in OPEN_ITEMS.md's "retrain cluster" section (PDF review items 2 and 3).
+# data/models/cortex_network was retrained on a new 4-way split
+# (scripts/split_network.py --cal-frac 0.1: 1,331,042 train / 211,697 val /
+# 195,715 cal / 213,217 test; val and test byte-identical to the prior
+# 3-way split, ambiguous-group exclusion unchanged). The Platt calibrator
+# is now fit on `cal` -- held out of BOTH the booster fit and early
+# stopping, not the val split -- and this operating point is derived on
+# `cal` alone via models.network_lgbm.find_threshold_for_fpr(); `test` was
+# not read during training or threshold selection (consumed once, at the
+# end, by scripts/evaluate_all_models.py). Removes the item-2 calibration
+# optimism (calibrator previously fit on the early-stopping val split) and
+# the item-3 threshold optimism (operating point previously chosen on the
+# same val+test pool it was then scored against).
 #
-# IMPORTANT -- three separate, evidence-backed reasons this threshold
-# should NOT be read as "solved," despite the clean numbers above:
+# target_fpr=0.001 (0.1%) on cal -> threshold 0.6672636218, actual FPR
+# 0.0988% (159 / 160,863 benign FP), detection_rate 0.9626. Same target-FPR
+# choice as the pre-fix derivation, kept rather than re-picked: 159 benign
+# FP is ample statistical power (one FP moves observed FPR by ~0.0006%), and
+# loosening to 0.5% buys only +0.8 pp detection for 5x the FPR on an ALERT-
+# capped signal. The threshold is not sitting on a discontinuity -- FPR and
+# detection move smoothly and monotonically across a +/-0.01 sweep around
+# it, and only 5 benign scores lie within +/-0.001. The honest
+# detection_rate is 0.9626, not the 0.9752 the old val+test derivation
+# reported as held-out recall -- that ~1.3 pp gap is the calibration/
+# threshold optimism the fix removes. A single-feature-AUC sweep on train
+# and cal found 0 of 78 features above 0.95 AUC (max ~0.77) -- no fixed-
+# testbed shortcut, same result as before. Held-out test metrics at this
+# threshold are regenerated in EVAL_ALL_MODELS_RESULTS.txt.
 #
-# 1. Infiltration detection is 10.75% (n_test=1,433, n_train=11,463 -- NOT
-#    an under-training artifact; every other under-10,000-train class
-#    still hit >=91% except the two flagged below). Independently confirmed
-#    as a documented weak spot: infiltration attacks are slow/low-volume by
-#    design and don't produce the distinctive flow-statistics signature
-#    CICFlowMeter captures well for DDoS/brute-force -- a comparative study
-#    found infiltration on this dataset is only well-detected using
-#    NetFlow-derived features, not CICFlowMeter's. This is a feature-
-#    representation ceiling, not a pipeline defect, and was deliberately
-#    NOT chased by tuning the threshold lower -- that would spike FPR
-#    across every other class for a class this representation structurally
-#    can't see well. Full per-attack-type table in the README.
-# 2. CSE-CIC-IDS2018 has independently reported label noise of up to ~7.5%
-#    (automatic time-window-based labeling, not human-verified per-flow) --
-#    some fraction of both the training signal and the test-set "ground
-#    truth" used to compute the metrics above is simply wrong, in a
-#    direction and magnitude we can't correct for from inside this dataset.
-# 3. Models reported as "nearly perfect" on this dataset -- which is what
-#    ours is -- have been independently shown to degrade toward random
-#    performance when evaluated on external/real-world traffic. This is a
-#    documented pattern for CSE-CIC-IDS2018 specifically, not a generic
-#    "may not generalize" hedge: the test-set numbers above should not be
-#    assumed predictive of real-world performance without independent
-#    validation on traffic this dataset didn't generate.
+# IMPORTANT -- reasons this threshold should NOT be read as "solved,"
+# unchanged by the retrain (they are dataset/representation properties, not
+# calibration artifacts):
+#  1. Infiltration attacks are slow/low-volume and lack the flow-statistics
+#     signature CICFlowMeter captures for DDoS/brute-force -- a feature-
+#     representation ceiling (the prior test pass measured ~10.75% detection
+#     on that class at n_train=11,463, i.e. not under-training). Deliberately
+#     NOT chased by lowering the threshold, which would spike FPR across
+#     every other class. The step-f per-attack-type table (now produced by
+#     scripts/evaluate_all_models.py) is the reference.
+#  2. CSE-CIC-IDS2018 has independently reported label noise up to ~7.5%
+#     (time-window labeling, not per-flow human review).
+#  3. Models "nearly perfect" on this dataset -- which this one is -- have
+#     been shown to degrade toward random on external traffic.
+# These are why network's authority is capped at ALERT below (see decide()'s
+# docstring), on two independent legs: the Infiltration blind spot and the
+# external-validation-collapse pattern.
 #
-# These three are why network's authority is capped at ALERT below, the
-# same rung as memory -- see decide()'s docstring for the full reasoning,
-# which (unlike memory's single-legged single-VM finding) rests on two
-# independent legs: the Infiltration blind spot, and the external-
-# validation-collapse pattern.
-#
-# RE-DERIVED 2026-09-08 after the Platt-calibrator fix (fit on raw booster
-# margins, not sigmoid probabilities). Booster unchanged -> AUC-ROC
-# (0.9972) and the held-out test operating point (FPR 0.098%, detection
-# 97.52%) are unchanged; only the calibrated score scale moved (this value
-# dropped a lot in absolute terms because the old near-step calibrator
-# pushed almost everything to ~0 or ~1). Pre-fix value was 0.9441855970306654.
+# Superseded values -- never reuse: 0.5883628015255921 (2026-09-08
+# recalibration on the old 3-way split), 0.9441855970306654 (the
+# pre-calibrator-fix value).
 NETWORK_MALICIOUS_MIN: Optional[float] = _thr(_THRESHOLDS, "network", "malicious_at_or_above")
 
 # Emulation threshold -- derived, but for LOGGING / TELEMETRY ONLY. This is
