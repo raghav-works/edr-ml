@@ -116,6 +116,10 @@ MEMORY_VAL = "data/processed/memory_val.parquet"
 MEMORY_TEST = "data/processed/memory_test.parquet"
 NETWORK_VAL = "data/processed/network_val.parquet"
 NETWORK_TEST = "data/processed/network_test.parquet"
+# Read for one thing only: the per-attack-type TRAIN-support counts printed
+# next to the TEST-split per-class detection rates (see
+# _network_per_class_breakdown). Never scored against.
+NETWORK_TRAIN = "data/processed/network_train.parquet"
 BEHAVIORAL_VAL = "data/processed/behavioral_val.parquet"
 BEHAVIORAL_TEST = "data/processed/behavioral_test.parquet"
 EMULATION_VAL = "data/processed/emulation_val.parquet"
@@ -566,6 +570,66 @@ def _load_network_xy(path: str, limit: Optional[int]) -> tuple[np.ndarray, np.nd
     return X, y
 
 
+def _load_network_label_raw(path: str, limit: Optional[int]) -> np.ndarray:
+    """The raw per-flow attack-scenario label (e.g. 'DDOS attack-HOIC',
+    'Infiltration', 'Benign'), aligned row-for-row with _load_network_xy's
+    output on the same path/limit (both read the full parquet in file order,
+    then take the first `limit` rows)."""
+    df = pd.read_parquet(path, columns=["label_raw"])
+    if limit:
+        df = df.iloc[:limit]
+    return df["label_raw"].to_numpy()
+
+
+def _network_per_class_breakdown(y: np.ndarray, proba: np.ndarray, label_raw: np.ndarray,
+                                 thr: float, aggregate_recall: float) -> dict:
+    """Per-attack-type detection rate on the TEST split, printed next to each
+    class's TRAIN-split support count.
+
+    Relocated from scripts/train_network.py, which no longer reads the test
+    split at all (split-discipline retrain -- see OPEN_ITEMS.md). Intent is
+    unchanged: an aggregate recall dominated by high-support classes (Benign,
+    DDOS attack-HOIC, DDoS attacks-LOIC-HTTP) can hide near-total failure on
+    a low-support one (e.g. Infiltration), and a low per-class score should
+    be read as "wasn't given enough examples to learn from" where the
+    train-support count shows that -- not asserted as a generically
+    hard-to-detect class.
+
+    TEST split only: `label_raw` here is the frozen test split's, and the
+    only other split touched is TRAIN, read for its class-support counts and
+    never scored. `val` and `cal` are not read.
+    """
+    try:
+        train_support = pd.read_parquet(NETWORK_TRAIN, columns=["label_raw"])["label_raw"].value_counts()
+    except (FileNotFoundError, OSError):
+        logger.info("   per-attack-type breakdown skipped: %s absent", NETWORK_TRAIN)
+        return {}
+
+    preds = (proba >= thr).astype(np.int32)
+    logger.info("   -- per-attack-type detection on TEST @ NETWORK_MALICIOUS_MIN "
+                "(n_train = support in %s) --", NETWORK_TRAIN)
+    logger.info("      aggregate TEST recall at this threshold = %.4f", aggregate_recall)
+    rows: dict[str, dict] = {}
+    for lr in sorted(set(label_raw.tolist())):
+        m = label_raw == lr
+        n = int(m.sum())
+        n_train = int(train_support.get(lr, 0))
+        rate = float((preds[m] == 1).mean()) if n else 0.0
+        if str(lr).strip().lower() == "benign":
+            logger.info("      %-27s n_test=%7d n_train=%9d  FPR=%.4f  (benign -- false positive rate, not detection)",
+                        lr, n, n_train, rate)
+            rows[lr] = {"n_test": n, "n_train": n_train, "fpr": rate}
+            continue
+        flag = ""
+        if rate < aggregate_recall - 0.05:
+            flag = "  <-- BELOW aggregate recall by >5pp"
+            if n_train < 5000:
+                flag += f"; matches low train support ({n_train} rows) -- under-trained, not necessarily 'hard'"
+        logger.info("      %-27s n_test=%7d n_train=%9d  detection_rate=%.4f%s", lr, n, n_train, rate, flag)
+        rows[lr] = {"n_test": n, "n_train": n_train, "detection_rate": rate}
+    return rows
+
+
 def evaluate_network(limit: Optional[int] = None,
                      cfg: PrevalenceConfig = PrevalenceConfig()) -> dict:
     from inference import policy_engine as pe
@@ -587,6 +651,9 @@ def evaluate_network(limit: Optional[int] = None,
         print_binary("@ NETWORK_MALICIOUS_MIN", ev)
         out["splits"][split] = ev
         out["prevalence"][split] = print_prevalence("@ NETWORK_MALICIOUS_MIN", ev, cfg, y, proba)
+        if split == "test":
+            label_raw = _load_network_label_raw(path, limit)
+            out["per_attack_type"] = _network_per_class_breakdown(y, proba, label_raw, thr, ev.recall)
     return out
 
 

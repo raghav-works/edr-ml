@@ -37,6 +37,7 @@ _REQUIRED = [
     "data/processed/ember2024_train.parquet", "data/processed/ember2024_test.parquet",
     "data/processed/memory_val.parquet", "data/processed/memory_test.parquet",
     "data/processed/network_val.parquet", "data/processed/network_test.parquet",
+    "data/processed/network_train.parquet",  # per-attack-type breakdown reads its label_raw support counts
     "data/processed/behavioral_val.parquet", "data/processed/behavioral_test.parquet",
 ]
 _MISSING = [p for p in _REQUIRED if not os.path.exists(p)]
