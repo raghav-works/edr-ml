@@ -144,6 +144,7 @@ def _model_hash(booster: lgb.Booster) -> str:
 def train(
     X_train: NDArray[np.float32], y_train: NDArray[np.int32],
     X_val: NDArray[np.float32], y_val: NDArray[np.int32],
+    X_cal: NDArray[np.float32], y_cal: NDArray[np.int32],
     *, params: Optional[dict[str, Any]] = None,
     n_estimators: int = DEFAULT_N_ESTIMATORS,
     early_stopping_rounds: int = DEFAULT_EARLY_STOPPING,
@@ -168,8 +169,17 @@ def train(
         # raw margins, NOT on probabilities -- fitting on the sigmoid output
         # of a near-separable booster collapses the calibrator into a
         # near-step function (see models/static_lgbm.py::train()).
-        raw_val_margins = booster.predict(X_val, raw_score=True, num_iteration=booster.best_iteration)
-        calibrator = PlattCalibrator().fit(raw_val_margins, y_val)
+        #
+        # The margins come from X_cal, a split held out of BOTH the booster
+        # fit and early stopping -- not X_val. best_iteration is chosen to
+        # maximize separation on X_val, so val margins are optimistically
+        # separated and a calibrator fit on them is over-confident on
+        # genuinely unseen data (PDF review item 2). X_cal informs no fitting
+        # or model-selection decision, so its margins are an honest basis for
+        # the monotone probability map. Predicted at best_iteration, matching
+        # inference.
+        raw_cal_margins = booster.predict(X_cal, raw_score=True, num_iteration=booster.best_iteration)
+        calibrator = PlattCalibrator().fit(raw_cal_margins, y_cal)
 
     return NetworkLGBMModel(booster=booster, calibrator=calibrator, feature_count=feature_count,
                              num_iterations=booster.best_iteration, model_hash=_model_hash(booster))
