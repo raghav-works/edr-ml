@@ -63,10 +63,26 @@ Models / splits covered
      never reaches a live decision. Skipped cleanly if the checkpoint or
      splits are absent.
 
+Deployment-prevalence projection (review item 4)
+-----------------------------------------------
+Every confusion matrix above is at the split's OWN class balance (~50%
+malicious for most, ~25% for network), so the reported precision is an
+optimistic, balanced-test-set number. After each block the script prints a
+projection onto realistic endpoint prevalence -- PPV, alert rate, and
+false/true positives per 10k/100k files -- at several assumed malicious base
+rates (default 1 in 1,000 / 10,000 / 100,000; override with --prevalence).
+FPR and TPR are conditional on the true class so they re-project; precision
+does not. This is a PER-SIGNAL positive-verdict rate only: the combined
+pipeline's ALERT / NEEDS_REVIEW / TERMINATE volume through decide() is not
+modelled (it needs a file-population model this repo does not have). With
+--target-ppv it also reports, read-only against each test ROC, the
+highest-recall threshold that would reach a target PPV at each prevalence.
+
 Usage:
     python -m scripts.evaluate_all_models                 # full run
     python -m scripts.evaluate_all_models --limit 3000    # sample each split (smoke)
     python -m scripts.evaluate_all_models --only static,memory
+    python -m scripts.evaluate_all_models --prevalence 1e-4,1e-5 --target-ppv 0.5
 """
 from __future__ import annotations
 
@@ -79,7 +95,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
-from sklearn.metrics import roc_auc_score
+from sklearn.metrics import roc_auc_score, roc_curve
 
 logger = logging.getLogger("cortex.evaluate_all_models")
 
@@ -197,6 +213,162 @@ def print_binary(title: str, ev: BinaryEval) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Deployment-prevalence projection (review item 4)
+# ---------------------------------------------------------------------------
+# The confusion matrices above are computed at each split's OWN class balance
+# (~50% malicious for static/memory/behavioral, ~25% for network). A real
+# endpoint is overwhelmingly benign, so the reported precision is optimistic
+# by orders of magnitude. FPR and TPR are conditional on the true class, so
+# they re-project onto an assumed prevalence pi; precision does not.
+#
+#   PPV(pi)        = TPR*pi / (TPR*pi + FPR*(1-pi))          [Bayes]
+#   alert_rate(pi) = TPR*pi + FPR*(1-pi)                     [P(flagged)]
+#   FP per N       = N * (1-pi) * FPR
+#   TP per N       = N * pi     * TPR
+#
+# Caveat printed with every block: this is a PER-SIGNAL positive-verdict rate.
+# The combined pipeline's ALERT / NEEDS_REVIEW / TERMINATE volume through
+# decide() is NOT modelled here -- that needs a file-population model (what
+# fraction of files are non-PE, carry an API trace / memory vector / network
+# flow, fail extraction) which this repo does not have. See OPEN_ITEMS.md.
+
+DEFAULT_PREVALENCES: tuple[float, ...] = (1e-3, 1e-4, 1e-5)
+DEFAULT_FP_PER: tuple[int, ...] = (10_000, 100_000)
+
+
+@dataclass(frozen=True)
+class PrevalenceConfig:
+    prevalences: tuple[float, ...] = DEFAULT_PREVALENCES
+    fp_per: tuple[int, ...] = DEFAULT_FP_PER
+    target_ppv: Optional[float] = None
+
+
+@dataclass
+class PrevalenceRow:
+    prevalence: float
+    ppv: float
+    alert_rate: float
+    fp_per: dict          # N -> expected false positives
+    tp_per: dict          # N -> expected true positives
+
+
+@dataclass
+class PrevalenceProjection:
+    fpr: float
+    tpr: float
+    n_benign: int
+    n_malicious: int
+    fpr_ci95_upper: Optional[float]   # rule-of-three upper bound, set only when 0 FP observed
+    rows: list
+
+
+def ppv_at_prevalence(fpr: float, tpr: float, prevalence: float) -> float:
+    """Bayes PPV = P(malicious | flagged) at an assumed malicious base rate."""
+    num = tpr * prevalence
+    den = tpr * prevalence + fpr * (1.0 - prevalence)
+    return num / den if den > 0.0 else 0.0
+
+
+def alert_rate_at_prevalence(fpr: float, tpr: float, prevalence: float) -> float:
+    """P(flagged) over the whole population at the given base rate."""
+    return tpr * prevalence + fpr * (1.0 - prevalence)
+
+
+def expected_fp(fpr: float, prevalence: float, n: int) -> float:
+    return n * (1.0 - prevalence) * fpr
+
+
+def expected_tp(tpr: float, prevalence: float, n: int) -> float:
+    return n * prevalence * tpr
+
+
+def project_to_prevalence(ev: BinaryEval, cfg: PrevalenceConfig) -> PrevalenceProjection:
+    rows = [
+        PrevalenceRow(
+            prevalence=pi,
+            ppv=ppv_at_prevalence(ev.fpr, ev.recall, pi),
+            alert_rate=alert_rate_at_prevalence(ev.fpr, ev.recall, pi),
+            fp_per={n: expected_fp(ev.fpr, pi, n) for n in cfg.fp_per},
+            tp_per={n: expected_tp(ev.recall, pi, n) for n in cfg.fp_per},
+        )
+        for pi in cfg.prevalences
+    ]
+    # Rule of three: 0 events in n_benign trials -> ~95% CI upper bound 3/n on
+    # the true FPR. Flags a clean-looking PPV that rests on a thin benign set.
+    ci = (3.0 / ev.n_benign) if (ev.fp == 0 and ev.n_benign > 0) else None
+    return PrevalenceProjection(
+        fpr=ev.fpr, tpr=ev.recall, n_benign=ev.n_benign, n_malicious=ev.n_malicious,
+        fpr_ci95_upper=ci, rows=rows,
+    )
+
+
+def threshold_for_target_ppv(y: np.ndarray, proba: np.ndarray,
+                             target_ppv: float, prevalence: float):
+    """Highest-recall threshold on the test ROC whose projected PPV at
+    `prevalence` reaches `target_ppv`. Returns (threshold, fpr, recall) or None
+    if no threshold reaches it. Read-only against the ROC -- changes nothing."""
+    y = np.asarray(y)
+    if len(np.unique(y)) < 2:
+        return None
+    fpr_arr, tpr_arr, thr_arr = roc_curve(y, proba)
+    candidates = [
+        (float(th), float(f), float(t))
+        for f, t, th in zip(fpr_arr, tpr_arr, thr_arr)
+        if ppv_at_prevalence(f, t, prevalence) >= target_ppv
+    ]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda c: c[2])  # highest recall meeting the PPV bar
+
+
+def _prev_label(pi: float) -> str:
+    return f"1 in {round(1.0 / pi):,}"
+
+
+def print_prevalence(title: str, ev: BinaryEval, cfg: PrevalenceConfig,
+                     y: Optional[np.ndarray] = None,
+                     proba: Optional[np.ndarray] = None) -> PrevalenceProjection:
+    proj = project_to_prevalence(ev, cfg)
+    logger.info("   -- deployment-prevalence projection: %s (deployed threshold held fixed) --", title)
+    logger.info("      per-signal positive-verdict rate only; combined pipeline volume not modelled (see header)")
+    logger.info("      measured on this split: FPR=%.4f  TPR=%.4f  (%d benign / %d malicious rows)",
+                proj.fpr, proj.tpr, proj.n_benign, proj.n_malicious)
+    if proj.fpr_ci95_upper is not None:
+        logger.info("      NOTE: 0 false positives on only %d benign rows -- the PPVs below are an UPPER BOUND,",
+                    proj.n_benign)
+        logger.info("      not a point estimate. Rule-of-three 95%% CI upper bound on the true FPR is ~%.4f (%.2f%%);",
+                    proj.fpr_ci95_upper, 100.0 * proj.fpr_ci95_upper)
+        logger.info("      at that FPR the PPVs collapse like every other signal's.")
+
+    hdr = "      %-13s %8s %8s" % ("prevalence", "PPV", "alert%")
+    for n in cfg.fp_per:
+        hdr += " %10s" % f"FP/{n // 1000}k"
+    for n in cfg.fp_per:
+        hdr += " %10s" % f"TP/{n // 1000}k"
+    logger.info(hdr)
+    for r in proj.rows:
+        line = "      %-13s %8.4f %7.2f%%" % (_prev_label(r.prevalence), r.ppv, 100.0 * r.alert_rate)
+        for n in cfg.fp_per:
+            line += " %10s" % f"~{r.fp_per[n]:,.0f}"
+        for n in cfg.fp_per:
+            line += " %10s" % f"~{r.tp_per[n]:,.1f}"
+        logger.info(line)
+
+    if cfg.target_ppv is not None and y is not None and proba is not None:
+        logger.info("      -- target-PPV bridge (--target-ppv %.2f; reads the ROC, no threshold change) --",
+                    cfg.target_ppv)
+        for pi in cfg.prevalences:
+            hit = threshold_for_target_ppv(np.asarray(y), np.asarray(proba), cfg.target_ppv, pi)
+            if hit is None:
+                logger.info("      %-14s  no threshold on this ROC reaches PPV>=%.2f", _prev_label(pi), cfg.target_ppv)
+                continue
+            th, f, rec = hit
+            logger.info("      %-14s  threshold>=%.6f  FPR=%.6f  recall=%.4f  (deployed recall %.4f, delta %+.4f)",
+                        _prev_label(pi), th, f, rec, ev.recall, rec - ev.recall)
+    return proj
+
+
+# ---------------------------------------------------------------------------
 # 1. Cortex-Static
 # ---------------------------------------------------------------------------
 def _ember_feature_cols(names) -> list[str]:
@@ -288,7 +460,8 @@ def _static_three_way(y: np.ndarray, proba: np.ndarray, allow_max: float, block_
     return out
 
 
-def evaluate_static(limit: Optional[int] = None) -> dict:
+def evaluate_static(limit: Optional[int] = None,
+                    cfg: PrevalenceConfig = PrevalenceConfig()) -> dict:
     from inference import policy_engine as pe
     from models.static_lgbm import LGBMModel
 
@@ -300,7 +473,8 @@ def evaluate_static(limit: Optional[int] = None) -> dict:
     logger.info("   STATIC_BLOCK_MIN = %.16f", block_min)
 
     model = LGBMModel.load(STATIC_MODEL)
-    results = {"thresholds": {"STATIC_ALLOW_MAX": allow_max, "STATIC_BLOCK_MIN": block_min}, "splits": {}}
+    results = {"thresholds": {"STATIC_ALLOW_MAX": allow_max, "STATIC_BLOCK_MIN": block_min},
+               "splits": {}, "prevalence": {}}
 
     for split, loader in (("val", _load_ember_val), ("test", _load_ember_test)):
         path = EMBER_TRAIN if split == "val" else EMBER_TEST
@@ -326,11 +500,15 @@ def evaluate_static(limit: Optional[int] = None) -> dict:
         print_binary("@ BLOCK boundary (BLOCK=+)", block_ev)
         logger.info("   AUC-ROC (threshold-independent): %s", _fmt_auc(allow_ev.auc_roc))
 
+        allow_proj = print_prevalence("@ ALLOW boundary (escalate=+)", allow_ev, cfg, y, proba)
+        block_proj = print_prevalence("@ BLOCK boundary (BLOCK=+)", block_ev, cfg)
+
         results["splits"][split] = {
             "three_way": tw,
             "allow_boundary": allow_ev,
             "block_boundary": block_ev,
         }
+        results["prevalence"][split] = {"allow_boundary": allow_proj, "block_boundary": block_proj}
     return results
 
 
@@ -350,7 +528,8 @@ def _load_memory_xy(path: str, limit: Optional[int]) -> tuple[np.ndarray, np.nda
     return X, y
 
 
-def evaluate_memory(limit: Optional[int] = None) -> dict:
+def evaluate_memory(limit: Optional[int] = None,
+                    cfg: PrevalenceConfig = PrevalenceConfig()) -> dict:
     from inference import policy_engine as pe
     from models.memory_lgbm import MemoryLGBMModel
 
@@ -360,7 +539,7 @@ def evaluate_memory(limit: Optional[int] = None) -> dict:
     logger.info("   MEMORY_MALICIOUS_MIN = %.16f  (verdict capped at ALERT in decide())", thr)
 
     model = MemoryLGBMModel.load(MEMORY_MODEL)
-    out = {"threshold": thr, "splits": {}}
+    out = {"threshold": thr, "splits": {}, "prevalence": {}}
     for split, path in (("val", MEMORY_VAL), ("test", MEMORY_TEST)):
         X, y = _load_memory_xy(path, limit)
         proba = model.predict_proba(X)
@@ -369,6 +548,7 @@ def evaluate_memory(limit: Optional[int] = None) -> dict:
         logger.info(" split=%s  (%s)", split, path)
         print_binary("@ MEMORY_MALICIOUS_MIN", ev)
         out["splits"][split] = ev
+        out["prevalence"][split] = print_prevalence("@ MEMORY_MALICIOUS_MIN", ev, cfg, y, proba)
     return out
 
 
@@ -386,7 +566,8 @@ def _load_network_xy(path: str, limit: Optional[int]) -> tuple[np.ndarray, np.nd
     return X, y
 
 
-def evaluate_network(limit: Optional[int] = None) -> dict:
+def evaluate_network(limit: Optional[int] = None,
+                     cfg: PrevalenceConfig = PrevalenceConfig()) -> dict:
     from inference import policy_engine as pe
     from models.network_lgbm import NetworkLGBMModel
 
@@ -396,7 +577,7 @@ def evaluate_network(limit: Optional[int] = None) -> dict:
     logger.info("   NETWORK_MALICIOUS_MIN = %.16f  (verdict capped at ALERT in decide())", thr)
 
     model = NetworkLGBMModel.load(NETWORK_MODEL)
-    out = {"threshold": thr, "splits": {}}
+    out = {"threshold": thr, "splits": {}, "prevalence": {}}
     for split, path in (("val", NETWORK_VAL), ("test", NETWORK_TEST)):
         X, y = _load_network_xy(path, limit)
         proba = model.predict_proba(X)
@@ -405,6 +586,7 @@ def evaluate_network(limit: Optional[int] = None) -> dict:
         logger.info(" split=%s  (%s)", split, path)
         print_binary("@ NETWORK_MALICIOUS_MIN", ev)
         out["splits"][split] = ev
+        out["prevalence"][split] = print_prevalence("@ NETWORK_MALICIOUS_MIN", ev, cfg, y, proba)
     return out
 
 
@@ -420,7 +602,8 @@ def _behavioral_bands(lengths: np.ndarray, min_seq: int, max_seq: int) -> dict[s
     }
 
 
-def evaluate_behavioral(limit: Optional[int] = None) -> dict:
+def evaluate_behavioral(limit: Optional[int] = None,
+                        cfg: PrevalenceConfig = PrevalenceConfig()) -> dict:
     import torch
 
     from inference import policy_engine as pe
@@ -442,7 +625,7 @@ def evaluate_behavioral(limit: Optional[int] = None) -> dict:
     model.load_state_dict(torch.load(BEHAVIORAL_CKPT, map_location="cpu"))
     model.eval()
 
-    out = {"threshold": thr, "splits": {}}
+    out = {"threshold": thr, "splits": {}, "prevalence": {}}
     for split, path in (("val", BEHAVIORAL_VAL), ("test", BEHAVIORAL_TEST)):
         df = pd.read_parquet(path)
         if limit:
@@ -477,11 +660,15 @@ def evaluate_behavioral(limit: Optional[int] = None) -> dict:
         print_binary("TOTAL (deployment: short+ok)", dep_ev)
         print_binary("TOTAL (all rows, model-raw)", raw_ev)
 
+        dep_proj = print_prevalence("TOTAL (deployment: short+ok)", dep_ev, cfg,
+                                    y[dep_mask], proba[dep_mask])
+
         out["splits"][split] = {
             "bands": band_evs,
             "deployment_total": dep_ev,
             "model_raw_total": raw_ev,
         }
+        out["prevalence"][split] = {"deployment_total": dep_proj}
     return out
 
 
@@ -493,7 +680,12 @@ def _emulation_artifacts_present() -> bool:
                (EMULATION_CKPT, EMULATION_VOCAB, EMULATION_VAL, EMULATION_TEST))
 
 
-def evaluate_emulation(limit: Optional[int] = None) -> Optional[dict]:
+def evaluate_emulation(limit: Optional[int] = None,
+                       cfg: PrevalenceConfig = PrevalenceConfig()) -> Optional[dict]:
+    # cfg is accepted for a uniform evaluator signature but unused: Cortex-
+    # Emulation is report-only and never reaches decide(), so a per-signal
+    # "positive-verdict rate at deployment prevalence" would imply an
+    # operational role it does not have.
     if not _emulation_artifacts_present():
         logger.info("=" * 78)
         logger.info("5. CORTEX-EMULATION  -- SKIPPED (checkpoint or splits absent)")
@@ -547,6 +739,30 @@ _EVALUATORS = {
 }
 
 
+def _parse_float_list(raw: str, name: str, ap: argparse.ArgumentParser,
+                      *, lo: float, hi: float) -> tuple[float, ...]:
+    try:
+        vals = tuple(float(x) for x in raw.split(",") if x.strip())
+    except ValueError:
+        ap.error(f"--{name}: could not parse {raw!r} as a comma list of numbers")
+    if not vals:
+        ap.error(f"--{name}: empty")
+    for v in vals:
+        if not (lo < v < hi):
+            ap.error(f"--{name}: {v} out of range ({lo}, {hi})")
+    return vals
+
+
+def _parse_int_list(raw: str, name: str, ap: argparse.ArgumentParser) -> tuple[int, ...]:
+    try:
+        vals = tuple(int(float(x)) for x in raw.split(",") if x.strip())
+    except ValueError:
+        ap.error(f"--{name}: could not parse {raw!r} as a comma list of integers")
+    if not vals or any(v <= 0 for v in vals):
+        ap.error(f"--{name}: must be positive integers")
+    return vals
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -554,6 +770,17 @@ def main() -> None:
                     help="cap rows per split (sampling; for a fast smoke run). Default: full splits.")
     ap.add_argument("--only", default="",
                     help="comma list of {static,memory,network,behavioral,emulation} to run (default: all)")
+    ap.add_argument("--prevalence", default=",".join(f"{p:g}" for p in DEFAULT_PREVALENCES),
+                    help="comma list of assumed malicious base rates for the prevalence projection "
+                         "(fraction, e.g. 1e-4 == 1 malicious file per 10,000). "
+                         f"Default: {','.join(f'{p:g}' for p in DEFAULT_PREVALENCES)}")
+    ap.add_argument("--fp-per", default=",".join(str(n) for n in DEFAULT_FP_PER),
+                    help=f"comma list of population sizes N for the FP/TP-per-N columns. "
+                         f"Default: {','.join(str(n) for n in DEFAULT_FP_PER)}")
+    ap.add_argument("--target-ppv", type=float, default=None,
+                    help="if set, also report the highest-recall threshold on each test ROC whose "
+                         "projected PPV reaches this value at each prevalence. Read-only; does not "
+                         "change config/thresholds.yaml.")
     args = ap.parse_args()
 
     which = [s.strip() for s in args.only.split(",") if s.strip()] or list(_EVALUATORS)
@@ -561,12 +788,24 @@ def main() -> None:
     if unknown:
         ap.error(f"unknown model(s): {unknown}; valid: {list(_EVALUATORS)}")
 
+    if args.target_ppv is not None and not (0.0 < args.target_ppv < 1.0):
+        ap.error(f"--target-ppv: {args.target_ppv} must be in (0, 1)")
+    cfg = PrevalenceConfig(
+        prevalences=_parse_float_list(args.prevalence, "prevalence", ap, lo=0.0, hi=1.0),
+        fp_per=_parse_int_list(args.fp_per, "fp-per", ap),
+        target_ppv=args.target_ppv,
+    )
+
     if args.limit:
         logger.info(">>> --limit=%d : sampling the first %d rows of each split (NOT a full evaluation) <<<",
                     args.limit, args.limit)
+    logger.info(">>> prevalence projection at malicious base rates: %s  (per-signal only; the",
+                ", ".join(_prev_label(p) for p in cfg.prevalences))
+    logger.info(">>> combined pipeline's ALERT/NEEDS_REVIEW/TERMINATE volume through decide() is")
+    logger.info(">>> NOT modelled -- that needs a file-population model this repo does not have.")
 
     for name in which:
-        _EVALUATORS[name](args.limit)
+        _EVALUATORS[name](args.limit, cfg)
 
     logger.info("=" * 78)
     logger.info("done. read-only run -- no model / threshold / parquet was written.")

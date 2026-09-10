@@ -222,6 +222,8 @@ The three active LightGBM trainers early-stop on validation and may fit Platt ca
 
 `scripts/verify_onnx_parity.py` checks Python-versus-ONNX behavior. Tests cover the policy truth table and thresholds, PE feature-vector contract/determinism/signed-file behavior, model-evaluation structure, and optional artifact-backed ONNX parity.
 
+`scripts/evaluate_all_models.py` re-runs every model against its val and test splits at the deployed thresholds. Because those splits are near class-balanced, its raw precision is optimistic; each block is followed by a **deployment-prevalence projection** (review item 4) — PPV, alert rate, and false/true positives per 10k/100k files at realistic malicious base rates (default 1 in 1,000 / 10,000 / 100,000, `--prevalence` to change) via `PPV(π) = TPR·π / (TPR·π + FPR·(1−π))`. It is a per-signal positive-verdict rate only; the combined pipeline's `ALERT`/`NEEDS_REVIEW`/`TERMINATE` volume through `decide()` is **not** modelled (it needs a file-population model this repo does not have). `--target-ppv` additionally reports, read-only against each test ROC, the highest-recall threshold that would reach a target PPV.
+
 ## Repository map
 
 | Location | Responsibility |

@@ -20,6 +20,7 @@ import pytest
 
 from scripts.evaluate_all_models import (
     BinaryEval,
+    PrevalenceProjection,
     evaluate_behavioral,
     evaluate_emulation,
     evaluate_memory,
@@ -59,13 +60,31 @@ def _check_binary_eval(ev: BinaryEval) -> None:
     assert ev.auc_roc != ev.auc_roc or 0.0 <= ev.auc_roc <= 1.0  # NaN allowed (one-class slice)
 
 
+def _check_prevalence_projection(proj: PrevalenceProjection) -> None:
+    assert isinstance(proj, PrevalenceProjection)
+    assert 0.0 <= proj.fpr <= 1.0 and 0.0 <= proj.tpr <= 1.0
+    assert proj.n_benign >= 0 and proj.n_malicious >= 0
+    assert proj.fpr_ci95_upper is None or proj.fpr_ci95_upper > 0.0
+    assert proj.rows, "projection has no prevalence rows"
+    for r in proj.rows:
+        assert 0.0 < r.prevalence < 1.0
+        assert 0.0 <= r.ppv <= 1.0
+        assert 0.0 <= r.alert_rate <= 1.0
+        assert all(v >= 0.0 for v in r.fp_per.values())
+        assert all(v >= 0.0 for v in r.tp_per.values())
+
+
 def test_static_evaluator_runs_and_is_consistent():
     res = evaluate_static(limit=_LIMIT)
     assert set(res["splits"]) == {"val", "test"}
+    assert set(res["prevalence"]) == {"val", "test"}
     for split in ("val", "test"):
         s = res["splits"][split]
         _check_binary_eval(s["allow_boundary"])
         _check_binary_eval(s["block_boundary"])
+        p = res["prevalence"][split]
+        _check_prevalence_projection(p["allow_boundary"])
+        _check_prevalence_projection(p["block_boundary"])
         # 3-way rows each sum to that class's n
         for cls in ("benign", "malicious"):
             row = s["three_way"][cls]
@@ -85,18 +104,22 @@ def test_static_evaluator_runs_and_is_consistent():
 def test_lgbm_signal_evaluators_run_and_are_consistent(evaluator):
     res = evaluator(limit=_LIMIT)
     assert set(res["splits"]) == {"val", "test"}
+    assert set(res["prevalence"]) == {"val", "test"}
     for split in ("val", "test"):
         _check_binary_eval(res["splits"][split])
+        _check_prevalence_projection(res["prevalence"][split])
 
 
 def test_behavioral_evaluator_bands_and_totals():
     res = evaluate_behavioral(limit=_LIMIT)
     assert set(res["splits"]) == {"val", "test"}
+    assert set(res["prevalence"]) == {"val", "test"}
     for split in ("val", "test"):
         s = res["splits"][split]
         dep, raw = s["deployment_total"], s["model_raw_total"]
         _check_binary_eval(dep)
         _check_binary_eval(raw)
+        _check_prevalence_projection(res["prevalence"][split]["deployment_total"])
         band_n = 0
         for band, ev in s["bands"].items():
             if ev is not None:

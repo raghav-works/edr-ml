@@ -203,6 +203,22 @@ this repo (not carried over from the prior project's placeholder values):
 If you retrain any model from scratch, the raw score distribution will
 differ and these need to be re-derived again, not assumed to still hold.
 
+**Reading the evaluation output at realistic prevalence:**
+`python -m scripts.evaluate_all_models` prints each model's val/test confusion
+matrix at the deployed threshold — but those splits are near class-balanced,
+so the raw precision is optimistic. Each block is now followed by a
+**deployment-prevalence projection** (review item 4): PPV, alert rate, and
+false/true positives per 10k/100k files at assumed malicious base rates
+(default 1 in 1,000 / 10,000 / 100,000; `--prevalence` to change), via
+`PPV(π) = TPR·π / (TPR·π + FPR·(1−π))`. At 1 malware per 10,000 files, several
+signals' current thresholds project to <10% PPV (e.g. Cortex-Memory ≈ 0.9%),
+i.e. ~100+ false alarms per true detection — the numbers the balanced test
+set hides. It is a **per-signal** rate; the combined pipeline's
+`ALERT`/`NEEDS_REVIEW`/`TERMINATE` volume through `decide()` is not modelled
+(that needs a file-population model this repo lacks). `--target-ppv 0.5`
+additionally reports, read-only against each test ROC, the higher threshold
+(and the recall it costs) needed to reach that PPV.
+
 **Known limitation (behavioral threshold):** across the full val+test sweep,
 exactly one benign sample is misclassified at every threshold below ~0.922 --
 a MalbehavD-V1 sample whose trace includes networking-setup calls

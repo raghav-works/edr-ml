@@ -43,6 +43,36 @@ should instead fail-closed like behavioral. Either direction is a one-signal
 change plus test updates; the point is that it should be a decision, not an
 accident.
 
+## PDF review item 4 — deployment-prevalence evaluation — DONE (per-signal)
+
+`scripts/evaluate_all_models.py` prints a deployment-prevalence projection
+after every confusion matrix: `PPV(π) = TPR·π / (TPR·π + FPR·(1−π))`, alert
+rate, and false/true positives per 10k/100k files, at assumed malicious base
+rates (default 1 in 1,000 / 10,000 / 100,000, `--prevalence` to override).
+The projection math (`ppv_at_prevalence` / `alert_rate_at_prevalence` /
+`expected_fp` / `expected_tp` / `project_to_prevalence`) is a pure function
+of the measured FPR/TPR and is unit-tested in `tests/test_prevalence.py`
+(round-trip to the measured precision at the test split's own prevalence,
+hand-computed low-π cases, monotonicity, edge cases). A block computed from
+0 observed false positives prints its `n_benign` and a rule-of-three 95% CI
+upper bound on the true FPR, so a clean-looking PPV can't hide a thin benign
+set. `--target-ppv` reports, read-only against each test ROC, the
+highest-recall threshold reaching a target PPV (no threshold change).
+
+**Explicit non-goal (stated in the script output, not just here):** the
+COMBINED pipeline's ALERT / NEEDS_REVIEW / TERMINATE volume through
+`decide()` is not modelled. That needs a file-population model — what
+fraction of endpoint files are non-PE, carry an API trace / memory vector /
+network flow, or fail extraction — which this repo does not have. NEEDS_REVIEW
+volume in particular is dominated by the non-PE fraction (item 9 moved that
+out of the ALERT stream), which no model test set can estimate.
+
+The **modeling-side** prior correction the PDF also mentions (shifting the
+calibrated probability / threshold to target a precision at π, which edits
+`config/thresholds.yaml`) is deliberately NOT done here — it belongs in the
+retrain cluster. `--target-ppv` shows what such a threshold would cost in
+recall without making the change.
+
 ## PDF review item 6 — feature-extraction degradation is explicit — DONE
 
 `PEFeatureExtractor` no longer swallows a failed feature group into a silent
