@@ -143,8 +143,14 @@ change. Tracked there, not forgotten.
 
 Three coupled defects, all fixed by one retrain pass with a proper split
 discipline. The split-scheme design below was reviewed and agreed on
-2026-09-10; it is the plan of record for the implementation sessions, which
-have **not** started.
+2026-09-10; it is the plan of record for the implementation sessions.
+
+**Status (2026-09-10): memory + network half DONE. Static half still OPEN**
+as its own later session (EMBER2024 parquet regen + ~2 h retrain that has
+previously OOM-killed this machine — see "Implementation sequence" below).
+The static session also lands item 8's residue and re-checks the BLOCK cap
+(item 2 interim cap NOT lifted — see below). See "Progress" under
+"Implementation sequence" for exactly what the memory/network half changed.
 
 ### The defects
 
@@ -234,6 +240,52 @@ Per session, in order:
   `EVAL_ALL_MODELS_RESULTS.txt`.
 - `g.` re-check item 2's interim BLOCK cap — see below.
 
+### Progress — memory + network half (2026-09-10)
+
+Done in one session, exactly the agreed sequence (steps `b`, `c`, `d`, `f`;
+`e` and `g` are static-only). `val` and `test` for both models are
+**byte-identical** to the pre-retrain 3-way splits (SHA-256 verified) — only
+`train` shrank and `cal` was carved between `test` and `train` from the same
+seeded per-bucket permutation.
+
+- `b.` `scripts/split_memory.py` / `scripts/split_network.py` gained a
+  required `--cal-frac` / `--cal-out` and a `cal` phase inserted between the
+  `test` and `train` fills. Memory `--cal-frac 0.2` → cal 11,787 rows /
+  5,860 benign (enlarged, matches the old val+test benign count); network
+  `--cal-frac 0.1` → cal 195,715 rows / 160,863 benign (the design table's
+  "~211,700" over-projected; 0.1 hits the stated "~10%" spec and the benign
+  count is far more than the `target_fpr=0.001` derivation needs). Leakage /
+  group / ambiguous-group invariants all re-passed.
+- `c.` `models/memory_lgbm.py::train()` / `models/network_lgbm.py::train()`
+  take `X_cal, y_cal` and fit the Platt calibrator on `cal` margins at
+  `best_iteration` (not `X_val`). `scripts/train_memory.py` /
+  `scripts/train_network.py` dropped `--test` entirely — they take
+  `--train --val --cal --out`, so "`test` untouched during training" is
+  structural, not disciplinary. Network's per-attack-type test breakdown
+  moved to `scripts/evaluate_all_models.py` (step `f`); its single-feature
+  AUC leakage check now runs train-vs-`cal`. Retrained: memory
+  `best_iteration` 71→127 (0.7 s), network 760→879 (54 s). ONNX re-exported
+  for both; `verify_onnx_parity` clean (0 verdict flips at the new
+  thresholds). `models/static_lgbm.py` is untouched — the static session
+  mirrors this change there.
+- `d.` `config/thresholds.yaml`: `memory.malicious_at_or_above`
+  0.0006464189644018 → **0.0024964628** (cal `target_fpr=0.01`: 56/5,860
+  benign FP, detection 0.9993); `network.malicious_at_or_above`
+  0.5883628015255921 → **0.6672636218** (cal `target_fpr=0.001`: 159/160,863
+  benign FP, detection 0.9626). Same target-FPR choices as the superseded
+  derivation, re-measured on `cal` — not re-picked from the new numbers.
+  `inference/policy_engine.py` constant comments rewritten to match; the
+  ALERT-cap rationale for both signals is retained (dataset/representation
+  properties, unaffected by the retrain).
+- `f.` `EVAL_ALL_MODELS_RESULTS.txt` sections 2 (memory) and 3 (network)
+  regenerated on the frozen `test` splits, now with the item-4 prevalence
+  projection and network's per-attack-type table. Held-out `test` at the new
+  thresholds is essentially unchanged from the old committed numbers (memory
+  FPR 0.96%/detection 0.9997; network FPR 0.09%/recall 0.9750/AUC 0.99718)
+  — the operating point was re-derived without ever reading `test`, and it
+  still lands well there. Sections 1/4/5 (static / behavioral / emulation)
+  left as-is. Full suite green at every step (117 passed).
+
 ### Item 2 interim BLOCK cap — this pass does NOT lift it
 
 `policy_engine.decide()`'s docstring lists three removal criteria, ALL
@@ -270,5 +322,11 @@ re-validation — separate from the split-discipline retrain above.
 ## Docs pass (batch, not piecemeal)
 
 - `README.md` — calibration-saturation section (~lines 176/852) still
-  describes pre-fix behaviour; head/flow already updated.
+  describes pre-fix behaviour; head/flow already updated. Also now: the
+  Cortex-Memory / Cortex-Network sections still quote the pre-2026-09-10
+  thresholds, the old `val+test`-combined derivation, and the old held-out
+  numbers — supersede with the `cal`-split derivation and the regenerated
+  `EVAL_ALL_MODELS_RESULTS.txt` figures (memory 0.0024964628 @ `target_fpr`
+  0.01; network 0.6672636218 @ `target_fpr` 0.001). Static's section stays
+  as-is until its retrain session.
 - `PROJECT_HISTORY_REPORT.md` — uncommitted edits pending.
