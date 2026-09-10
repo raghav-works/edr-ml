@@ -139,20 +139,120 @@ change. Tracked there, not forgotten.
   `tests/test_policy_engine.py` (the `decide()` truth table run by hand all
   session) and a pytest wrapper around `scripts/verify_onnx_parity.py`.
 
-## Deferred to a deliberate retrain pass
+## The retrain cluster (PDF items 2, 3, and item 8's residue) — design agreed 2026-09-10
 
-- **Threshold-selection optimistic bias** — memory/network operating
-  thresholds are derived on `val+test` combined and then held-out metrics
-  are quoted on that same pool. Fix = a 3-way split (separate
-  threshold-selection set). Fold into the next retrain, not a standalone
-  re-run.
-- **`pe_features.py`-vs-thrember feature-fidelity skew** — cortex-ml's live
-  vector skews toward "malicious"; this is the real cause behind the interim
-  cap on Cortex-Static's BLOCK authority (`policy_engine.decide()` "INTERIM
-  CAP"). Closing it needs the parity harness first, then a static retrain +
-  threshold re-derivation + real-world re-validation.
-- **`ExportsInfo` count fix** (commit `bb1ade0`) delivers no model change
-  until the next static retrain regenerates the EMBER2024 parquets.
+Three coupled defects, all fixed by one retrain pass with a proper split
+discipline. The split-scheme design below was reviewed and agreed on
+2026-09-10; it is the plan of record for the implementation sessions, which
+have **not** started.
+
+### The defects
+
+- **Item 2 — calibration optimism.** The Platt calibrator for static,
+  memory, and network is fit on `X_val` — the *same* split that drives early
+  stopping (`best_iteration`). `best_iteration` is chosen to maximize val
+  separation, so the booster's margins on val are optimistically separated,
+  and a calibrator fit on them produces over-confident probabilities on
+  genuinely held-out data. Verified in `models/static_lgbm.py::train()`,
+  `models/memory_lgbm.py::train()`, `scripts/train_network.py`.
+- **Item 3 — threshold optimism.** Static picks its operating thresholds on
+  `ember2024_test` itself (`config/thresholds.yaml` header says so
+  explicitly) and then reports metrics on that same split. Memory and
+  network pick thresholds on `val + test` combined and quote held-out
+  metrics on that same pool (`scripts/train_memory.py`,
+  `scripts/train_network.py`). The operating point is chosen on data it is
+  later scored against.
+- **Item 8 residue.** The `ExportsInfo` count fix (commit `bb1ade0`) is
+  correct in `features/pe_features.py` / `features/ember2024_adapter.py` but
+  the deployed `data/models/cortex_static.lgbm` (Aug 18) was trained on
+  parquets carrying the old constant-128 bug. It lands only when the
+  EMBER2024 parquets are regenerated and static is retrained — which this
+  pass does anyway.
+
+### Target discipline — four roles, consumed in this order
+
+1. `train` — booster fit.
+2. `val` — `best_iteration` only.
+3. `cal` — Platt fit **and** `config/thresholds.yaml` re-derivation. One
+   split covers both: each is a "fit a monotone map / pick an operating
+   point" task, neither is scored against, and a 5th split only fragments
+   thin data (memory) for no gain.
+4. `test` — read exactly once, at the very end, for reported numbers only.
+
+EMBER2024 upstream ships only `train` / `test` zips (+ an unlabeled
+`challenge.zip`) — checked against the HF file list. There is no free
+upstream validation split; static's `cal` must be carved locally.
+
+### Agreed carve: freeze `val` + `test`, slice `cal` from the front of `train`
+
+The greedy allocators in `scripts/split_memory.py` /
+`scripts/split_network.py` fill val, then test, then train from **one seeded
+permutation** of the group list. Insert a `cal` phase between `test` and
+`train`: with the seed unchanged, val and test receive the same leading
+groups they get today (**byte-identical**), and `cal` is a deterministic
+slice of what would have been train. `scripts/train_static.py` has no split
+script — `_load_train_val_split` does the same with `rng.permutation(n_rows)`
+and slicing; `perm[:n_val]` stays val, `perm[n_val:n_val+n_cal]` becomes
+`cal`, the remainder is train.
+
+Why this and not a fresh 4-way re-split: every historical `val` / `test`
+metric stays comparable (only the model changes — retrained on less data,
+recalibrated on `cal`, re-thresholded on `cal`); the group/dedup
+leakage invariants extend to `cal` for free (groups stay atomic units); and
+churn in the maintained record is minimal. It is **per-model** — the four
+datasets share no rows, so a shared `cal` split is not meaningful; the
+recipe is what is shared.
+
+| Model | train → | `val` (frozen) | `cal` (new) | `test` (frozen) | `cal` benign ≈ | Notes |
+|---|---|---|---|---|---|---|
+| Static | 2,340,000 → ~1,872,000 (80%) | 234,000 (10%) | ~234,000 (10%) | 539,940 | ~117,000 | static threshold **moves off `test`** onto `cal` |
+| Memory | 46,736 → ~35,000 | 5,930 | **~11,700** (enlarged) | 5,930 | ~5,800 | `cal` deliberately enlarged to match the benign count the current `val+test` derivation used; train at ~35k still ample for 62 features |
+| Network | 1,526,757 → ~1,320,000 | 211,697 | ~211,700 | 213,217 | ~178,000 | `split_network.py`'s per-group Python loop (~25 min) re-runs once |
+
+### Implementation sequence (agreed)
+
+**Memory + network first, as one session; static as its own later session.**
+Memory/network are minutes of compute, low RAM, fully reversible — they
+prove the split + calibration + threshold pattern and get it committed
+before the expensive half. Static's parquet regen (many GB from HF; also
+where item 8 lands) + retrain is **~2 h and has previously OOM-killed this
+38 GB machine**; the memory-management mitigations are all in place and the
+2.34M-row train has completed post-fix since, and carving `cal` reduces
+train rows, but it stays the long pole and the only real failure mode.
+124 GB disk free, 20 cores.
+
+Per session, in order:
+- `b.` add a `--cal-frac` / `cal` phase to the split path (per model above).
+- `c.` refit the calibrator on `cal`, not on the early-stopping `val`.
+- `d.` re-derive every value in `config/thresholds.yaml` from `cal` only —
+  `test` stays untouched until everything is frozen.
+- `e.` (static session only) regenerate the EMBER2024 parquets via
+  `data/download_ember2024.py` — this also lands item 8's `ExportsInfo`
+  fix — then retrain static.
+- `f.` re-run `scripts/evaluate_all_models.py` (now with item 4's
+  deployment-prevalence projection) on the clean splits and regenerate
+  `EVAL_ALL_MODELS_RESULTS.txt`.
+- `g.` re-check item 2's interim BLOCK cap — see below.
+
+### Item 2 interim BLOCK cap — this pass does NOT lift it
+
+`policy_engine.decide()`'s docstring lists three removal criteria, ALL
+required, and all three are the thrember feature-parity cluster (item 7,
+still blocked on the `signify` version conflict): parity test passing on
+real PEs, residual `pe_features`-vs-thrember skew closed, real-world
+confirmed-label re-validation with no confirmed-benign file at/above
+`STATIC_BLOCK_MIN`. The retrain fixes *calibration and threshold
+discipline*, not *feature fidelity* or *booster ranking* — the docstring is
+explicit that "no calibration or threshold change fixes a ranking problem".
+The pass lands item 8's `ExportsInfo` fix (one small input-fidelity gain)
+but the cap stays until item 7 is done.
+
+### `pe_features.py`-vs-thrember feature-fidelity skew (separate track)
+
+cortex-ml's live vector skews toward "malicious"; this is the real cause
+behind the BLOCK cap. Closing it needs the parity harness first (item 7),
+then its own static retrain + threshold re-derivation + real-world
+re-validation — separate from the split-discipline retrain above.
 
 ## Cleanup
 
