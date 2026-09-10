@@ -36,6 +36,16 @@ supplied with no model wired are flagged `"model_not_configured"` **without**
 changing the decision — a not-yet-deployed signal is made visible, not
 escalated.
 
+A feature group that fails extraction is listed in `ScanResult.degraded_groups`
+instead of silently becoming a zero vector (review item 6). A degraded
+**critical** group (`features.pe_features.CRITICAL_FEATURE_GROUPS`) sets
+`static_verdict = ERROR` → `NEEDS_REVIEW` (reason `static_features_degraded`),
+because an all-zero group can fabricate maliciousness (an empty import table)
+or erase it (dropped IOC strings); a non-critical group only sets
+`signal_health["static"] = "degraded"`. `CortexPipeline()` runs a startup
+self-test against a bundled signed PE and raises if a critical group is broken
+(pass `self_test=False` to skip).
+
 ## Layout
 ```
 cortex/

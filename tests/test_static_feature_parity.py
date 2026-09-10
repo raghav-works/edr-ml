@@ -33,6 +33,7 @@ import pytest
 
 from features.ember2024_adapter import _GROUP_FIELDS, record_to_vector
 from features.pe_features import (
+    CRITICAL_FEATURE_GROUPS,
     EMBER2024_FEATURE_COUNT,
     AuthenticodeSignature,
     ExportsInfo,
@@ -173,6 +174,83 @@ def test_adapter_passthrough_is_byte_identical(extractor, path):
         "ember2024_adapter.record_to_vector diverged from the live "
         "process_raw_features path on identical group dicts"
     )
+
+
+# ------------------------------------------------- check 6 (review item 6)
+# Feature-group degradation is REPORTED, not silently zero-filled, and the
+# startup self-test catches a broken extractor.
+
+def test_clean_extraction_reports_no_degraded_groups(extractor):
+    for path in _FIXTURES:
+        _, degraded = extractor.feature_vector_with_report(_read(path))
+        assert degraded == [], f"{os.path.basename(path)}: unexpected degraded groups {degraded}"
+
+
+def test_raising_group_is_reported_and_zero_filled(monkeypatch):
+    """A group that raises during raw extraction is recorded in the degraded
+    list and its slice is zero-filled -- not left as a partial/NaN vector."""
+    ex = PEFeatureExtractor()
+    target = next(g for g in ex._groups if g.name == "imports")
+    monkeypatch.setattr(target, "raw_features",
+                        lambda bytez, pe: (_ for _ in ()).throw(RuntimeError("boom")))
+
+    off = 0
+    for g in ex._groups:
+        if g.name == "imports":
+            break
+        off += g.dim
+
+    vec, degraded = ex.feature_vector_with_report(_read(_SIGNED))
+    assert vec.shape == (EMBER2024_FEATURE_COUNT,)
+    assert np.isfinite(vec).all()
+    assert "imports" in degraded
+    assert not vec[off:off + target.dim].any(), "degraded 'imports' slice was not zero-filled"
+
+
+def test_double_failure_still_yields_full_finite_vector(monkeypatch):
+    """Even if the pe=None retry ALSO raises for every group, the vector is
+    still (2568,), finite, all-zero -- and every group is reported degraded."""
+    ex = PEFeatureExtractor()
+    for g in ex._groups:
+        monkeypatch.setattr(g, "raw_features",
+                            lambda bytez, pe: (_ for _ in ()).throw(RuntimeError("boom")))
+    vec, degraded = ex.feature_vector_with_report(_read(_SIGNED))
+    assert vec.shape == (EMBER2024_FEATURE_COUNT,)
+    assert np.isfinite(vec).all()
+    assert (vec == 0).all()
+    assert sorted(degraded) == sorted(g.name for g in ex._groups)
+
+
+def test_authenticode_parse_error_is_reported_as_degraded(monkeypatch, extractor):
+    """authenticode sets parse_error=1 instead of raising -- it must still
+    surface in the degraded list."""
+    target = next(g for g in extractor._groups if g.name == "authenticode")
+    monkeypatch.setattr(
+        target, "raw_features",
+        lambda bytez, pe: {"num_certs": 0, "self_signed": 0, "empty_program_name": 0,
+                           "no_countersigner": 0, "parse_error": 1, "chain_max_depth": 0,
+                           "latest_signing_time": 0.0, "signing_time_diff": 0.0},
+    )
+    _, degraded = extractor.feature_vector_with_report(_read(_SIGNED))
+    assert "authenticode" in degraded
+
+
+def test_self_test_passes_on_bundled_reference(extractor):
+    assert extractor.self_test() == []
+
+
+def test_self_test_flags_a_broken_critical_group(monkeypatch, extractor):
+    target = next(g for g in extractor._groups if g.name == "section")
+    monkeypatch.setattr(target, "raw_features",
+                        lambda bytez, pe: (_ for _ in ()).throw(RuntimeError("boom")))
+    failures = extractor.self_test()
+    assert "degraded_group:section" in failures
+    assert "section" in CRITICAL_FEATURE_GROUPS
+
+
+def test_self_test_reports_missing_reference_pe(extractor, tmp_path):
+    out = extractor.self_test(pe_path=tmp_path / "nonexistent.exe")
+    assert out and out[0].startswith("reference_pe_not_found:")
 
 
 # --------------------------------------------------------------- misc

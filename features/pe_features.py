@@ -35,6 +35,15 @@ Requires: pefile, numpy, scikit-learn (FeatureHasher), and signify>=0.9,<0.10
 (Authenticode parsing). signify is NOT optional: without it the 8-dim
 authenticode group would zero out, skewing static scores on signed binaries,
 so PEFeatureExtractor() raises at construction if it is missing.
+
+Feature-group degradation (review item 6): a group that raises during
+extraction is no longer silently swallowed into a zero vector. It is logged
+at WARNING and reported -- feature_vector_with_report() returns the list of
+degraded groups, and self_test() checks the extractor against a known-good
+signed PE at startup. CRITICAL_FEATURE_GROUPS names the groups whose zero-fill
+fabricates or erases a primary maliciousness signal; the pipeline routes a
+scan with any degraded critical group to NEEDS_REVIEW rather than trusting the
+score.
 """
 
 from __future__ import annotations
@@ -82,6 +91,26 @@ except ImportError:
 
 EMBER2024_FEATURE_COUNT = 2568
 _WARNINGS_FILE = Path(__file__).parent / "pefile_warnings.txt"
+
+# Feature groups whose silent zero-fill fabricates or erases a PRIMARY
+# maliciousness signal (review item 6). If any of these degrades on a live
+# scan, the static score is untrustworthy in an unknown direction and the
+# pipeline routes the scan to NEEDS_REVIEW instead of acting on it
+# (inference/pipeline.py). The three EXCLUDED groups -- exports, richheader,
+# pefilewarnings -- are the ones where an all-zero vector is also a common
+# LEGITIMATE value (an EXE with no exports, a non-MSVC binary with no Rich
+# header, a clean parse with no warnings), so their degradation is
+# in-distribution and recorded for telemetry only.
+CRITICAL_FEATURE_GROUPS = frozenset({
+    "general", "histogram", "byteentropy", "strings",
+    "header", "section", "imports", "datadirectories", "authenticode",
+})
+
+# Known-good signed Windows PE for PEFeatureExtractor.self_test(). Single
+# source of truth -- the committed test fixture, not a duplicated copy.
+_SELFTEST_PE = (
+    Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "pe_samples" / "sample_signed64.exe"
+)
 
 
 class FeatureGroup(ABC):
@@ -371,49 +400,51 @@ class HeaderFileInfo(FeatureGroup):
         }
         if pe is None:
             return raw
-        try:
-            fh, oh = pe.FILE_HEADER, pe.OPTIONAL_HEADER
-            raw["coff"]["timestamp"] = fh.TimeDateStamp
-            raw["coff"]["machine"] = pefile.MACHINE_TYPE.get(fh.Machine, "IMAGE_FILE_MACHINE_UNKNOWN")
-            raw["coff"]["number_of_sections"] = fh.NumberOfSections
-            raw["coff"]["number_of_symbols"] = fh.NumberOfSymbols
-            raw["coff"]["sizeof_optional_header"] = fh.SizeOfOptionalHeader
-            raw["coff"]["pointer_to_symbol_table"] = fh.PointerToSymbolTable
-            raw["coff"]["characteristics"] = [k[11:] for k, v in fh.__dict__.items()
-                                               if k.startswith("IMAGE_FILE_") and v]
-            raw["optional"]["magic"] = oh.Magic
-            raw["optional"]["subsystem"] = pefile.SUBSYSTEM_TYPE.get(oh.Subsystem, "IMAGE_SUBSYSTEM_UNKNOWN")
-            raw["optional"]["major_image_version"] = oh.MajorImageVersion
-            raw["optional"]["minor_image_version"] = oh.MinorImageVersion
-            raw["optional"]["major_linker_version"] = oh.MajorLinkerVersion
-            raw["optional"]["minor_linker_version"] = oh.MinorLinkerVersion
-            raw["optional"]["major_operating_system_version"] = oh.MajorOperatingSystemVersion
-            raw["optional"]["minor_operating_system_version"] = oh.MinorOperatingSystemVersion
-            raw["optional"]["major_subsystem_version"] = oh.MajorSubsystemVersion
-            raw["optional"]["minor_subsystem_version"] = oh.MinorSubsystemVersion
-            raw["optional"]["sizeof_code"] = oh.SizeOfCode
-            raw["optional"]["sizeof_headers"] = oh.SizeOfHeaders
-            raw["optional"]["sizeof_image"] = oh.SizeOfImage
-            raw["optional"]["sizeof_initialized_data"] = oh.SizeOfInitializedData
-            raw["optional"]["sizeof_uninitialized_data"] = oh.SizeOfUninitializedData
-            raw["optional"]["sizeof_stack_reserve"] = oh.SizeOfStackReserve
-            raw["optional"]["sizeof_stack_commit"] = oh.SizeOfStackCommit
-            raw["optional"]["sizeof_heap_reserve"] = oh.SizeOfHeapReserve
-            raw["optional"]["sizeof_heap_commit"] = oh.SizeOfHeapCommit
-            raw["optional"]["address_of_entrypoint"] = oh.AddressOfEntryPoint
-            raw["optional"]["base_of_code"] = oh.BaseOfCode
-            raw["optional"]["image_base"] = oh.ImageBase
-            raw["optional"]["section_alignment"] = oh.SectionAlignment
-            raw["optional"]["checksum"] = oh.CheckSum
-            raw["optional"]["number_of_rvas_and_sizes"] = oh.NumberOfRvaAndSizes
-            raw["optional"]["dll_characteristics"] = [k[25:] for k, v in oh.__dict__.items()
-                                                       if k.startswith("IMAGE_DLLCHARACTERISTICS_") and v]
-            dos_dict = pe.DOS_HEADER.dump_dict()
-            for member in self._DOS_MEMBERS:
-                if dos_dict.get(member, {}).get("Value") is not None:
-                    raw["dos"][member] = dos_dict[member]["Value"]
-        except Exception:
-            logger.debug("HeaderFileInfo extraction failed", exc_info=True)
+        # Intentionally NOT wrapped in try/except: a pefile failure parsing the
+        # headers must propagate to PEFeatureExtractor.raw_features(), which
+        # records "header" in degraded_groups (review item 6). Swallowing it
+        # here returned a partially/all-zero header dict that read as a
+        # "stripped, no-mitigations" binary -- an invented maliciousness signal.
+        fh, oh = pe.FILE_HEADER, pe.OPTIONAL_HEADER
+        raw["coff"]["timestamp"] = fh.TimeDateStamp
+        raw["coff"]["machine"] = pefile.MACHINE_TYPE.get(fh.Machine, "IMAGE_FILE_MACHINE_UNKNOWN")
+        raw["coff"]["number_of_sections"] = fh.NumberOfSections
+        raw["coff"]["number_of_symbols"] = fh.NumberOfSymbols
+        raw["coff"]["sizeof_optional_header"] = fh.SizeOfOptionalHeader
+        raw["coff"]["pointer_to_symbol_table"] = fh.PointerToSymbolTable
+        raw["coff"]["characteristics"] = [k[11:] for k, v in fh.__dict__.items()
+                                           if k.startswith("IMAGE_FILE_") and v]
+        raw["optional"]["magic"] = oh.Magic
+        raw["optional"]["subsystem"] = pefile.SUBSYSTEM_TYPE.get(oh.Subsystem, "IMAGE_SUBSYSTEM_UNKNOWN")
+        raw["optional"]["major_image_version"] = oh.MajorImageVersion
+        raw["optional"]["minor_image_version"] = oh.MinorImageVersion
+        raw["optional"]["major_linker_version"] = oh.MajorLinkerVersion
+        raw["optional"]["minor_linker_version"] = oh.MinorLinkerVersion
+        raw["optional"]["major_operating_system_version"] = oh.MajorOperatingSystemVersion
+        raw["optional"]["minor_operating_system_version"] = oh.MinorOperatingSystemVersion
+        raw["optional"]["major_subsystem_version"] = oh.MajorSubsystemVersion
+        raw["optional"]["minor_subsystem_version"] = oh.MinorSubsystemVersion
+        raw["optional"]["sizeof_code"] = oh.SizeOfCode
+        raw["optional"]["sizeof_headers"] = oh.SizeOfHeaders
+        raw["optional"]["sizeof_image"] = oh.SizeOfImage
+        raw["optional"]["sizeof_initialized_data"] = oh.SizeOfInitializedData
+        raw["optional"]["sizeof_uninitialized_data"] = oh.SizeOfUninitializedData
+        raw["optional"]["sizeof_stack_reserve"] = oh.SizeOfStackReserve
+        raw["optional"]["sizeof_stack_commit"] = oh.SizeOfStackCommit
+        raw["optional"]["sizeof_heap_reserve"] = oh.SizeOfHeapReserve
+        raw["optional"]["sizeof_heap_commit"] = oh.SizeOfHeapCommit
+        raw["optional"]["address_of_entrypoint"] = oh.AddressOfEntryPoint
+        raw["optional"]["base_of_code"] = oh.BaseOfCode
+        raw["optional"]["image_base"] = oh.ImageBase
+        raw["optional"]["section_alignment"] = oh.SectionAlignment
+        raw["optional"]["checksum"] = oh.CheckSum
+        raw["optional"]["number_of_rvas_and_sizes"] = oh.NumberOfRvaAndSizes
+        raw["optional"]["dll_characteristics"] = [k[25:] for k, v in oh.__dict__.items()
+                                                   if k.startswith("IMAGE_DLLCHARACTERISTICS_") and v]
+        dos_dict = pe.DOS_HEADER.dump_dict()
+        for member in self._DOS_MEMBERS:
+            if dos_dict.get(member, {}).get("Value") is not None:
+                raw["dos"][member] = dos_dict[member]["Value"]
         return raw
 
     def process_raw_features(self, raw):
@@ -747,15 +778,43 @@ class PEFeatureExtractor:
             logger.info("pefile parse failed: %s", exc)
             return None
 
-    def raw_features(self, bytez: bytes) -> Dict[str, Any]:
+    def raw_features(self, bytez: bytes, *, _degraded: Optional[list] = None) -> Dict[str, Any]:
+        """Per-group raw feature extraction.
+
+        `_degraded` (keyword-only, internal): if a list is passed, the name of
+        every group that could not be extracted cleanly is appended to it --
+        review item 6. A group lands in `_degraded` when its extraction raised
+        (and was retried with pe=None, i.e. degraded to defaults) OR, for the
+        authenticode group, when signify set parse_error=1. Public callers
+        (features/ember2024_adapter.py, tests) pass nothing and get the same
+        dict as before.
+        """
         pe = self._parse(bytez)
         out = {"sha256": hashlib.sha256(bytez).hexdigest()}
         for g in self._groups:
             try:
                 out[g.name] = g.raw_features(bytez, pe)
             except Exception:
-                logger.debug("group '%s' failed", g.name, exc_info=True)
-                out[g.name] = g.raw_features(bytez, None)
+                # A raised feature group is NOT normal data. Log loudly (not
+                # debug), record it, and fall back to the pe=None defaults so
+                # the scan can still produce a vector -- the pipeline decides
+                # what a degraded critical group means for the verdict.
+                logger.warning("feature group '%s' raw extraction failed; using degraded defaults",
+                               g.name, exc_info=True)
+                if _degraded is not None and g.name not in _degraded:
+                    _degraded.append(g.name)
+                try:
+                    out[g.name] = g.raw_features(bytez, None)
+                except Exception:
+                    logger.warning("feature group '%s' degraded retry also failed; zero-filling",
+                                   g.name, exc_info=True)
+                    out[g.name] = None  # process_raw_features() zero-fills a None group
+        # authenticode's own try/except sets parse_error=1 rather than raising,
+        # so the loop above never sees it as a failure -- surface it here.
+        auth = out.get("authenticode")
+        if isinstance(auth, dict) and auth.get("parse_error"):
+            if _degraded is not None and "authenticode" not in _degraded:
+                _degraded.append("authenticode")
         if pe is not None:
             try:
                 pe.close()
@@ -763,18 +822,93 @@ class PEFeatureExtractor:
                 pass
         return out
 
-    def process_raw_features(self, raw: Dict[str, Any]) -> np.ndarray:
+    def process_raw_features(self, raw: Dict[str, Any], *, _degraded: Optional[list] = None) -> np.ndarray:
+        """Vectorize per-group raw features into the 2568-dim vector.
+
+        `_degraded` (keyword-only, internal): names of groups whose
+        vectorization raised and had to be zero-filled are appended (review
+        item 6). Public signature is unchanged for callers that pass nothing.
+        """
         parts = []
         for g in self._groups:
             try:
-                parts.append(g.process_raw_features(raw[g.name]))
+                part = g.process_raw_features(raw[g.name])
+                # A group can also "fail" WITHOUT raising: e.g. a None raw
+                # group (double extraction failure) makes ByteHistogram return
+                # a 0-d NaN scalar instead of a 256-vector. Validate shape and
+                # finiteness so a malformed part is caught here, not as a
+                # cryptic length mismatch when the model is called.
+                if np.shape(part) != (g.dim,) or not np.isfinite(part).all():
+                    raise ValueError(
+                        f"group '{g.name}' produced shape {np.shape(part)} "
+                        f"(expected ({g.dim},)) or non-finite values"
+                    )
             except Exception:
-                logger.debug("process failed for '%s'", g.name, exc_info=True)
-                parts.append(np.zeros(g.dim, dtype=np.float32))
+                logger.warning("feature group '%s' vectorization failed; zero-filling %d dims",
+                               g.name, g.dim, exc_info=True)
+                if _degraded is not None and g.name not in _degraded:
+                    _degraded.append(g.name)
+                part = np.zeros(g.dim, dtype=np.float32)
+            parts.append(part)
         return np.hstack(parts).astype(np.float32)
 
     def feature_vector(self, bytez: bytes) -> np.ndarray:
-        return self.process_raw_features(self.raw_features(bytez))
+        return self.feature_vector_with_report(bytez)[0]
+
+    def feature_vector_with_report(self, bytez: bytes) -> "tuple[np.ndarray, list[str]]":
+        """Like feature_vector(), but also returns the sorted list of feature
+        groups that had to be degraded (raised and fell back to zeros/defaults)
+        -- review item 6. An empty list means every group extracted cleanly.
+        """
+        degraded: list[str] = []
+        raw = self.raw_features(bytez, _degraded=degraded)
+        vec = self.process_raw_features(raw, _degraded=degraded)
+        return vec, sorted(set(degraded))
+
+    def _group_offset(self, name: str) -> int:
+        off = 0
+        for g in self._groups:
+            if g.name == name:
+                return off
+            off += g.dim
+        raise KeyError(name)
+
+    def self_test(self, pe_path: "str | Path | None" = None) -> list[str]:
+        """Run the extractor against a known-good signed Windows PE and return
+        a list of failure descriptions (empty == healthy). Does NOT raise --
+        the caller decides severity (CortexPipeline.__init__ raises on a
+        critical-group failure, warns on a non-critical one).
+
+        This catches, at startup, the class of regression where a pefile or
+        signify API change silently disables a feature group -- which would
+        otherwise only show up as skewed production scores.
+        """
+        path = Path(pe_path) if pe_path is not None else _SELFTEST_PE
+        if not path.is_file():
+            return [f"reference_pe_not_found:{path}"]
+        bytez = path.read_bytes()
+        try:
+            vec, degraded = self.feature_vector_with_report(bytez)
+        except Exception as exc:  # pragma: no cover - defensive
+            return [f"extraction_raised:{exc!r}"]
+
+        failures: list[str] = [f"degraded_group:{g}" for g in degraded]
+        if vec.shape != (EMBER2024_FEATURE_COUNT,):
+            failures.append(f"vector_shape:{vec.shape}")
+        if not np.isfinite(vec).all():
+            failures.append("vector_nonfinite")
+        auth_off = self._group_offset("authenticode")
+        if not vec[auth_off:auth_off + 8].any():
+            failures.append("authenticode_all_zero_on_signed_pe")
+        imports_off = self._group_offset("imports")
+        if vec[imports_off] <= 0:
+            failures.append("imports_pair_count_zero")
+        hist_off = self._group_offset("histogram")
+        if abs(float(vec[hist_off:hist_off + 256].sum()) - 1.0) > 1e-4:
+            failures.append("histogram_not_normalised")
+        if float(vec[0]) != float(len(bytez)):
+            failures.append("general_size_mismatch")
+        return failures
 
     def is_valid_pe(self, bytez: bytes) -> bool:
         """Rule-based PE validation gate (stage 3 of the architecture)."""

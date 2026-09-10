@@ -4,8 +4,12 @@ Cortex-Memory and Cortex-Network as independent signals:
 
   1. path validation (exists, is file, readable, <= 100 MiB)
   2. rule-based Windows PE validation (not an ML prediction)
-  3. SHA-256 + feature extraction (2568-dim EMBER2024-compatible)
-  4. Cortex-Static LightGBM -> static score -> ALLOW/ALERT/BLOCK
+  3. SHA-256 + feature extraction (2568-dim EMBER2024-compatible). A feature
+     group that fails extraction is recorded in ScanResult.degraded_groups
+     instead of silently becoming a zero vector (review item 6).
+  4. Cortex-Static LightGBM -> static score -> ALLOW/ALERT/BLOCK. If a
+     CRITICAL feature group degraded, the score is not trusted: static_verdict
+     becomes ERROR (-> NEEDS_REVIEW) with reason static_features_degraded.
   5. gate: a static ALLOW / ALERT / BLOCK proceeds to behavioral analysis
      (only a static scan ERROR skips it)
   6. (if API-call JSON supplied) Cortex-Behavioral -> BENIGN/MALICIOUS/PENDING
@@ -46,7 +50,7 @@ from typing import Optional
 
 import numpy as np
 
-from features.pe_features import PEFeatureExtractor
+from features.pe_features import CRITICAL_FEATURE_GROUPS, PEFeatureExtractor
 from inference.policy_engine import (
     BehavioralVerdict, FinalDecision, MemoryVerdict, NetworkVerdict, ScanResult, StaticVerdict,
     behavioral_verdict_from_score, decide, memory_verdict_from_score,
@@ -63,7 +67,7 @@ MAX_FILE_SIZE_BYTES = 100 * 1024 * 1024  # 100 MiB
 class CortexPipeline:
     def __init__(self, static_model: LGBMModel, behavioral_model=None,
                  tokenizer: Optional[ApiTokenizer] = None, memory_model=None,
-                 network_model=None, device: str = "cpu"):
+                 network_model=None, device: str = "cpu", self_test: bool = True):
         self.static_model = static_model
         self.behavioral_model = behavioral_model
         self.tokenizer = tokenizer
@@ -77,6 +81,31 @@ class CortexPipeline:
         self.network_model = network_model
         self.device = device
         self.feature_extractor = PEFeatureExtractor()
+
+        # Startup self-test (review item 6): run the feature extractor against
+        # a known-good signed PE once, here, so a pefile/signify API change
+        # that silently disables a feature group is caught at construction
+        # rather than as skewed production scores. A critical failure (a
+        # critical group degraded, a malformed vector, authenticode all-zero
+        # on a signed binary) means the extractor is broken for EVERY scan ->
+        # raise. Non-critical noise (reference PE absent, a non-critical group
+        # degraded) is logged, not fatal. Pass self_test=False in tests /
+        # offline tooling that build a pipeline without needing the check.
+        if self_test:
+            failures = self.feature_extractor.self_test()
+            blocking = [
+                f for f in failures
+                if not f.startswith("reference_pe_not_found")
+                and not (f.startswith("degraded_group:")
+                         and f.split(":", 1)[1] not in CRITICAL_FEATURE_GROUPS)
+            ]
+            if blocking:
+                raise RuntimeError(
+                    "PEFeatureExtractor.self_test() failed at startup -- the feature "
+                    f"extractor is not producing trustworthy vectors: {failures}"
+                )
+            if failures:
+                logger.warning("PEFeatureExtractor.self_test() non-blocking warnings: %s", failures)
 
     # ------------------------------------------------------------------
     def _validate_path(self, path: Path) -> Optional[str]:
@@ -154,14 +183,23 @@ class CortexPipeline:
 
         # 4-5. static feature extraction + LightGBM
         try:
-            feats = self.feature_extractor.feature_vector(bytez).reshape(1, -1)
-            static_score = float(self.static_model.predict_proba(feats)[0])
+            vec, degraded = self.feature_extractor.feature_vector_with_report(bytez)
+            result.degraded_groups = degraded
+            static_score = float(self.static_model.predict_proba(vec.reshape(1, -1))[0])
             result.static_score = static_score
             result.static_verdict = static_verdict_from_score(static_score)
         except Exception:
             logger.exception("static scan failed for %s", file_path)
             result.static_verdict = StaticVerdict.ERROR
             result.reason_codes.append("static_scan_exception")
+
+        # 5b. feature-group degradation telemetry (review item 6). ANY degraded
+        # group -- critical or not -- is recorded on signal_health for ops
+        # visibility (and on result.degraded_groups, set above). Whether a
+        # degraded group also overrides the verdict is decided in step 6b,
+        # AFTER behavioral has had its chance to run.
+        if result.degraded_groups:
+            result.signal_health["static"] = "degraded"
 
         # 6. gate: behavioral runs for any static verdict that produced a
         # usable score -- ALLOW, ALERT, or BLOCK -- when an API-call trace is
@@ -180,6 +218,25 @@ class CortexPipeline:
             if beh_note is not None:
                 result.reason_codes.append(beh_note)
         # else: static ERROR, or no api_calls_json_path -> behavioral stays NOT_PROVIDED
+
+        # 6b. If a CRITICAL feature group degraded (features.pe_features
+        # .CRITICAL_FEATURE_GROUPS), the static score cannot be trusted in a
+        # known direction -- zeros can fabricate maliciousness (an empty import
+        # table) OR erase it (dropped IOC strings). Set the score-derived
+        # verdict aside: StaticVerdict.ERROR routes the scan to NEEDS_REVIEW
+        # via decide(). This runs AFTER the behavioral gate on purpose -- a
+        # degraded static extraction must not suppress a caller-supplied API
+        # trace, and a completed behavioral MALICIOUS on the same file still
+        # wins (decide() rung 1 -> TERMINATE). A degraded NON-critical group
+        # (exports / richheader / pefilewarnings) is in-distribution and does
+        # not reach here. static_score stays populated for telemetry.
+        critical_degraded = set(result.degraded_groups) & CRITICAL_FEATURE_GROUPS
+        if critical_degraded:
+            logger.warning("critical feature group(s) degraded on %s: %s -> static verdict set aside",
+                           file_path, sorted(critical_degraded))
+            result.static_verdict = StaticVerdict.ERROR
+            if "static_features_degraded" not in result.reason_codes:
+                result.reason_codes.append("static_features_degraded")
 
         # 8. policy engine
         final, reasons = decide(result.static_verdict, result.behavioral_verdict,

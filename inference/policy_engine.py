@@ -356,6 +356,13 @@ class ScanResult:
     # diagnostic output only; decide() never sees it. Item 6 may extend this
     # with a "degraded" entry for partial feature extraction.
     signal_health: dict[str, str] = field(default_factory=dict)
+    # Feature groups that had to be degraded (zero-filled) during static
+    # extraction (review item 6). Empty == clean. A degraded CRITICAL group
+    # (features.pe_features.CRITICAL_FEATURE_GROUPS) makes pipeline.scan() set
+    # static_verdict = ERROR (-> NEEDS_REVIEW) and adds signal_health["static"]
+    # = "degraded"; a degraded non-critical group only sets the health flag.
+    # decide() never sees this list.
+    degraded_groups: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -368,6 +375,7 @@ class ScanResult:
             "final_decision": self.final_decision.value,
             "reason_codes": self.reason_codes,
             "signal_health": self.signal_health,
+            "degraded_groups": self.degraded_groups,
         }
 
 

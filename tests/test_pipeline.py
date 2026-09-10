@@ -11,6 +11,13 @@ End-to-end pipeline coverage for:
     that raises at runtime -> "model_error" (and NEEDS_REVIEW via its ERROR
     verdict); memory/network features supplied with no model wired ->
     "model_not_configured" AND the decision is unchanged (neutral).
+
+  * review item 6 -- a degraded feature group is recorded on
+    ScanResult.degraded_groups. A degraded CRITICAL group sets
+    static_verdict = ERROR (-> NEEDS_REVIEW) with reason
+    static_features_degraded; a non-critical one only sets
+    signal_health["static"] = "degraded". The pipeline self-test runs at
+    construction (self_test=False here to keep fixtures fast/isolated).
 """
 from __future__ import annotations
 
@@ -57,11 +64,21 @@ class _ExplodingModel:
         raise RuntimeError("simulated model failure")
 
 
+def _pipe(**kwargs) -> CortexPipeline:
+    """CortexPipeline with the item-6 startup self-test disabled by default --
+    it does real disk I/O + a full extraction of the bundled reference PE on
+    every construction, which these tests neither need nor want. The self-test
+    itself is covered by its own tests below and by test_static_feature_parity.
+    """
+    kwargs.setdefault("self_test", False)
+    return CortexPipeline(**kwargs)
+
+
 @pytest.fixture
 def pipeline():
     # No behavioral / memory / network models: this fixture only exercises the
     # static-side "cannot analyze" short-circuits.
-    return CortexPipeline(static_model=_ExplodingStaticModel())
+    return _pipe(static_model=_ExplodingStaticModel())
 
 
 def _assert_needs_review(result, expected_reason):
@@ -127,7 +144,7 @@ def test_security_event_carries_needs_review(pipeline, tmp_path):
 def test_healthy_scan_has_empty_signal_health():
     """A valid PE scored by a working static model, no memory/network signal:
     signal_health stays empty."""
-    pipe = CortexPipeline(static_model=_BenignStaticModel())
+    pipe = _pipe(static_model=_BenignStaticModel())
     result = pipe.scan(_VALID_PE)
     assert result.static_verdict == StaticVerdict.ALLOW
     assert result.final_decision == FinalDecision.ALLOW
@@ -138,7 +155,7 @@ def test_memory_model_error_is_needs_review_with_health():
     """A configured memory model that raises: verdict ERROR -> NEEDS_REVIEW
     (item 9 routing), and signal_health['memory'] == 'model_error' so ops can
     tell it apart from a genuine file-analysis failure (item 10)."""
-    pipe = CortexPipeline(static_model=_BenignStaticModel(), memory_model=_ExplodingModel())
+    pipe = _pipe(static_model=_BenignStaticModel(), memory_model=_ExplodingModel())
     result = pipe.scan(_VALID_PE, memory_features=_MEMORY_FEATURES)
 
     assert result.memory_verdict == MemoryVerdict.ERROR
@@ -151,7 +168,7 @@ def test_memory_model_error_is_needs_review_with_health():
 
 
 def test_network_model_error_is_needs_review_with_health():
-    pipe = CortexPipeline(static_model=_BenignStaticModel(), network_model=_ExplodingModel())
+    pipe = _pipe(static_model=_BenignStaticModel(), network_model=_ExplodingModel())
     result = pipe.scan(_VALID_PE, network_features=_NETWORK_FEATURES)
 
     assert result.network_verdict == NetworkVerdict.ERROR
@@ -165,7 +182,7 @@ def test_memory_features_without_model_is_visible_but_neutral():
     the decision is byte-for-byte what the same scan produces with no memory
     features at all -- a not-yet-deployed signal must not push scans to
     NEEDS_REVIEW (item 10, case A stays neutral)."""
-    pipe = CortexPipeline(static_model=_BenignStaticModel())  # memory_model=None
+    pipe = _pipe(static_model=_BenignStaticModel())  # memory_model=None
 
     baseline = pipe.scan(_VALID_PE)
     with_feats = pipe.scan(_VALID_PE, memory_features=_MEMORY_FEATURES)
@@ -178,7 +195,7 @@ def test_memory_features_without_model_is_visible_but_neutral():
 
 
 def test_network_features_without_model_is_visible_but_neutral():
-    pipe = CortexPipeline(static_model=_BenignStaticModel())  # network_model=None
+    pipe = _pipe(static_model=_BenignStaticModel())  # network_model=None
 
     baseline = pipe.scan(_VALID_PE)
     with_feats = pipe.scan(_VALID_PE, network_features=_NETWORK_FEATURES)
@@ -194,11 +211,120 @@ def test_signal_health_does_not_reach_decide():
     'model_not_configured' produce the same final_decision they would if
     decide() saw the raw verdicts (ERROR -> NEEDS_REVIEW, NOT_PROVIDED ->
     neutral). Guards that no one wired signal_health into the decision."""
-    err = CortexPipeline(static_model=_BenignStaticModel(), memory_model=_ExplodingModel())
-    unconfigured = CortexPipeline(static_model=_BenignStaticModel())
+    err = _pipe(static_model=_BenignStaticModel(), memory_model=_ExplodingModel())
+    unconfigured = _pipe(static_model=_BenignStaticModel())
 
     r_err = err.scan(_VALID_PE, memory_features=_MEMORY_FEATURES)
     r_unconf = unconfigured.scan(_VALID_PE, memory_features=_MEMORY_FEATURES)
 
     assert r_err.final_decision == FinalDecision.NEEDS_REVIEW      # from ERROR verdict
     assert r_unconf.final_decision == FinalDecision.ALLOW          # NOT_PROVIDED stays neutral
+
+
+# --------------------------------------------------------------------------
+# review item 6 -- degraded feature groups, separate from the verdict
+# --------------------------------------------------------------------------
+
+def _force_report(monkeypatch, pipe, degraded):
+    """Make the pipeline's extractor report `degraded` (and an all-zero
+    vector) without needing a real extraction failure."""
+    monkeypatch.setattr(
+        pipe.feature_extractor, "feature_vector_with_report",
+        lambda bytez: (np.zeros(2568, dtype=np.float32), list(degraded)),
+    )
+
+
+def test_clean_scan_has_no_degraded_groups():
+    pipe = _pipe(static_model=_BenignStaticModel())
+    result = pipe.scan(_VALID_PE)
+    assert result.degraded_groups == []
+    assert "static" not in result.signal_health
+    assert result.final_decision == FinalDecision.ALLOW
+
+
+def test_critical_degraded_group_routes_to_needs_review(monkeypatch):
+    pipe = _pipe(static_model=_BenignStaticModel())
+    _force_report(monkeypatch, pipe, ["imports", "section"])
+    result = pipe.scan(_VALID_PE)
+
+    assert result.degraded_groups == ["imports", "section"]
+    assert result.static_verdict == StaticVerdict.ERROR
+    assert "static_features_degraded" in result.reason_codes
+    assert result.signal_health["static"] == "degraded"
+    assert result.final_decision == FinalDecision.NEEDS_REVIEW
+    # score is still computed and kept for telemetry, even though the verdict
+    # is set aside
+    assert result.static_score is not None
+
+    event = pipe.to_security_event(result)
+    assert event["degraded_groups"] == ["imports", "section"]
+    assert event["signal_health"] == {"static": "degraded"}
+
+
+def test_noncritical_degraded_group_keeps_verdict(monkeypatch):
+    pipe = _pipe(static_model=_BenignStaticModel())
+    _force_report(monkeypatch, pipe, ["exports"])
+    result = pipe.scan(_VALID_PE)
+
+    assert result.degraded_groups == ["exports"]
+    assert result.static_verdict == StaticVerdict.ALLOW          # score-derived, kept
+    assert "static_features_degraded" not in result.reason_codes
+    assert result.signal_health["static"] == "degraded"          # telemetry only
+    assert result.final_decision == FinalDecision.ALLOW
+
+
+def test_critical_degraded_still_yields_to_behavioral_malicious(monkeypatch, tmp_path):
+    """A degraded critical static extraction must NOT suppress a caller-
+    supplied API trace: behavioral still runs, and a completed MALICIOUS
+    verdict wins (decide() rung 1 -> TERMINATE)."""
+    import torch
+
+    class _MaliciousBehavioral:
+        def __call__(self, x):
+            return torch.tensor([6.0])          # sigmoid -> ~0.9975 -> MALICIOUS
+
+    class _PassThroughTokenizer:
+        def encode(self, calls):
+            return np.zeros(100, dtype=np.int64), "ok"
+
+    trace = tmp_path / "trace.json"
+    trace.write_text('["NtCreateFile", "NtWriteFile"]')
+
+    pipe = _pipe(static_model=_BenignStaticModel(),
+                 behavioral_model=_MaliciousBehavioral(),
+                 tokenizer=_PassThroughTokenizer())
+    _force_report(monkeypatch, pipe, ["imports"])
+    result = pipe.scan(_VALID_PE, api_calls_json_path=str(trace))
+
+    assert result.static_verdict == StaticVerdict.ERROR          # critical degraded
+    assert result.behavioral_verdict.value == "MALICIOUS"        # behavioral still ran
+    assert result.final_decision == FinalDecision.TERMINATE
+    assert "static_features_degraded" in result.reason_codes
+
+
+# --------------------------------------------------------------------------
+# review item 6 -- startup self-test
+# --------------------------------------------------------------------------
+
+def test_pipeline_self_test_passes_on_bundled_reference_pe():
+    # Default self_test=True; the committed reference PE is clean, so
+    # constructing the pipeline must not raise.
+    CortexPipeline(static_model=_BenignStaticModel())
+
+
+def test_pipeline_self_test_raises_on_broken_critical_group(monkeypatch):
+    monkeypatch.setattr(
+        "features.pe_features.PEFeatureExtractor.self_test",
+        lambda self, pe_path=None: ["degraded_group:imports"],
+    )
+    with pytest.raises(RuntimeError, match="self_test"):
+        CortexPipeline(static_model=_BenignStaticModel())
+
+
+def test_pipeline_self_test_tolerates_noncritical_and_missing_reference(monkeypatch):
+    for benign in (["degraded_group:pefilewarnings"], ["reference_pe_not_found:/nope"]):
+        monkeypatch.setattr(
+            "features.pe_features.PEFeatureExtractor.self_test",
+            lambda self, pe_path=None, _b=benign: list(_b),
+        )
+        CortexPipeline(static_model=_BenignStaticModel())  # must not raise

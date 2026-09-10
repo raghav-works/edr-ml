@@ -43,12 +43,43 @@ should instead fail-closed like behavioral. Either direction is a one-signal
 change plus test updates; the point is that it should be a decision, not an
 accident.
 
-## Remaining follow-up — layers on items 9/10
+## PDF review item 6 — feature-extraction degradation is explicit — DONE
 
-- **Item 6** — feature-extraction failures should return a `degraded_groups`
-  list and mark a critical-group failure `NEEDS_REVIEW` explicitly (rather
-  than silently zero-filling), plus a startup self-test. It will extend
-  `signal_health` with a `"degraded"` entry for `static`.
+`PEFeatureExtractor` no longer swallows a failed feature group into a silent
+zero vector. `feature_vector_with_report()` returns the list of degraded
+groups; `raw_features()` / `process_raw_features()` log at WARNING and record
+each degradation; `process_raw_features()` also validates every group's
+output shape/finiteness so a malformed part (e.g. a `None` raw group making
+`ByteHistogram` return a 0-d NaN) is caught and zero-filled rather than
+producing a short, non-finite vector. `HeaderFileInfo`'s internal
+`try/except` was removed so a header-parse failure actually surfaces;
+`authenticode`'s `parse_error=1` is surfaced as a degradation too.
+
+`ScanResult.degraded_groups` carries the list. `pipeline.scan()` sets
+`signal_health["static"] = "degraded"` for any degradation, and for a
+**critical** group (`CRITICAL_FEATURE_GROUPS` — the nine whose all-zero fill
+fabricates or erases a primary maliciousness signal) also sets
+`static_verdict = ERROR` (→ `NEEDS_REVIEW`, reason `static_features_degraded`)
+— *after* the behavioral gate, so a caller-supplied API trace still runs and
+a completed behavioral `MALICIOUS` still wins. Non-critical groups
+(`exports`, `richheader`, `pefilewarnings` — where all-zero is also a common
+legitimate value) keep the score-derived verdict.
+
+`PEFeatureExtractor.self_test()` runs the extractor against the committed
+signed fixture (`tests/fixtures/pe_samples/sample_signed64.exe` — single
+source of truth, not a duplicated copy) and `CortexPipeline(self_test=True)`
+(default) raises at construction if a critical group is broken, warns on
+non-critical noise. Covered by `tests/test_pipeline.py` and
+`tests/test_static_feature_parity.py`.
+
+### Dependency pinning — deferred to item 7's parity cluster
+
+The PDF's item 6 also says "pin dependency versions". Only `signify` has an
+upper bound today; `pefile` and `scikit-learn` (whose `FeatureHasher` hashing
+is parity-critical) are lower-bound only. Tightening `scikit-learn` needs a
+`FeatureHasher` hash-stability re-check, which belongs with the `thrember`
+parity cross-check (item 7 in the Structural section below), not a standalone
+change. Tracked there, not forgotten.
 
 ## Structural
 
