@@ -54,12 +54,29 @@ duplicate rows that sample-id-based grouping wouldn't (e.g. a
 data-collection artifact producing an identical feature vector under two
 different Category labels).
 
+Four splits, not three: `cal` sits between `test` and `train`. The greedy
+per-bucket allocator fills val, then test, then cal, then train from one
+seeded permutation of that bucket's groups. Inserting the `cal` phase
+consumes no additional RNG draws, so val and test receive exactly the
+groups they did when this script produced three splits -- byte-identical --
+and `cal` is a deterministic slice carved from what would otherwise have
+been train. `cal` is the split the Platt calibrator is fit on and every
+`memory.*` value in config/thresholds.yaml is derived from; `val` is then
+used for LightGBM early stopping only and `test` is read exactly once, for
+reported numbers, after everything is frozen. See OPEN_ITEMS.md's "retrain
+cluster" section for the full rationale. `--cal-frac` is deliberately
+required with no default: memory uses 0.2 (an enlarged calibration set,
+sized to match the benign count the pre-split-discipline val+test threshold
+derivation relied on), unlike network's 0.1 -- the script refuses to guess.
+
 Usage:
     python -m scripts.split_memory \\
         --in data/processed/memory_dataset.parquet \\
         --train-out data/processed/memory_train.parquet \\
         --val-out   data/processed/memory_val.parquet \\
-        --test-out  data/processed/memory_test.parquet
+        --test-out  data/processed/memory_test.parquet \\
+        --cal-out   data/processed/memory_cal.parquet \\
+        --cal-frac  0.2
 """
 
 from __future__ import annotations
@@ -253,7 +270,8 @@ def report_group_sizes(df: pd.DataFrame) -> None:
         logger.info("  label=%d family=%-20s n=%d", label, family, count)
 
 
-def stratified_group_split(df: pd.DataFrame, val_frac: float, test_frac: float, seed: int) -> pd.DataFrame:
+def stratified_group_split(df: pd.DataFrame, val_frac: float, test_frac: float,
+                           cal_frac: float, seed: int) -> pd.DataFrame:
     rng = np.random.default_rng(seed)
     group_id = _assign_merged_groups(df)
     df = df.copy()
@@ -304,8 +322,9 @@ def stratified_group_split(df: pd.DataFrame, val_frac: float, test_frac: float, 
         total_rows = sum(len(g) for g in shuffled)
         target_val = round(total_rows * val_frac)
         target_test = round(total_rows * test_frac)
+        target_cal = round(total_rows * cal_frac)
 
-        val_count = test_count = 0
+        val_count = test_count = cal_count = 0
         for positions in shuffled:
             if val_count < target_val:
                 split_col[positions] = "val"
@@ -313,6 +332,14 @@ def stratified_group_split(df: pd.DataFrame, val_frac: float, test_frac: float, 
             elif test_count < target_test:
                 split_col[positions] = "test"
                 test_count += len(positions)
+            elif cal_count < target_cal:
+                # cal is carved AFTER val and test from the same seeded
+                # per-bucket permutation, so val and test receive exactly
+                # the groups they did before this phase existed
+                # (byte-identical output); cal is a deterministic slice of
+                # what would otherwise have been train.
+                split_col[positions] = "cal"
+                cal_count += len(positions)
             else:
                 split_col[positions] = "train"
 
@@ -365,11 +392,12 @@ def verify_zero_duplicate_feature_hashes(df: pd.DataFrame) -> None:
     )
 
 
-def report_split(df: pd.DataFrame, val_frac: float, test_frac: float) -> None:
+def report_split(df: pd.DataFrame, val_frac: float, test_frac: float, cal_frac: float) -> None:
     n = len(df)
     logger.info("=== Split report ===")
     logger.info("Total rows: %d", n)
-    for split, target_frac in (("train", 1 - val_frac - test_frac), ("val", val_frac), ("test", test_frac)):
+    for split, target_frac in (("train", 1 - val_frac - test_frac - cal_frac),
+                               ("val", val_frac), ("test", test_frac), ("cal", cal_frac)):
         sub = df[df["split"] == split]
         actual_frac = len(sub) / n
         n_benign = int((sub["label"] == 0).sum())
@@ -391,8 +419,14 @@ def main() -> None:
     ap.add_argument("--train-out", required=True)
     ap.add_argument("--val-out", required=True)
     ap.add_argument("--test-out", required=True)
+    ap.add_argument("--cal-out", required=True,
+                    help="Calibration split -- Platt fit + config/thresholds.yaml derivation.")
     ap.add_argument("--val-frac", type=float, default=0.1)
     ap.add_argument("--test-frac", type=float, default=0.1)
+    ap.add_argument("--cal-frac", type=float, required=True,
+                    help="Fraction of the dataset for the calibration split. Required, no "
+                         "default: memory uses 0.2 (enlarged, matches the benign count the "
+                         "pre-split-discipline val+test derivation relied on); network uses 0.1.")
     ap.add_argument("--seed", type=int, default=DEFAULT_SEED)
     args = ap.parse_args()
 
@@ -401,12 +435,13 @@ def main() -> None:
         raise ValueError(f"Expected a 'label' column (from data.download_memory.add_binary_label) in {args.inp}")
 
     report_group_sizes(df)
-    df = stratified_group_split(df, args.val_frac, args.test_frac, args.seed)
-    report_split(df, args.val_frac, args.test_frac)
+    df = stratified_group_split(df, args.val_frac, args.test_frac, args.cal_frac, args.seed)
+    report_split(df, args.val_frac, args.test_frac, args.cal_frac)
     verify_zero_group_leakage(df)
     verify_zero_duplicate_feature_hashes(df)
 
-    for split, out_path in (("train", args.train_out), ("val", args.val_out), ("test", args.test_out)):
+    for split, out_path in (("train", args.train_out), ("val", args.val_out),
+                            ("test", args.test_out), ("cal", args.cal_out)):
         sub = df[df["split"] == split].drop(columns=["split"]).reset_index(drop=True)
         sub.to_parquet(out_path, index=False)
         logger.info("Saved %s split (%d rows) to %s", split, len(sub), out_path)
