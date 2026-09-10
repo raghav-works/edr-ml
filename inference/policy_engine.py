@@ -346,6 +346,16 @@ class ScanResult:
     # malware finding. static_verdict stays ERROR ("nothing ran yet").
     final_decision: FinalDecision = FinalDecision.NEEDS_REVIEW
     reason_codes: list[str] = field(default_factory=list)
+    # Analyzer/model health, kept SEPARATE from the security verdict (review
+    # item 10). Sparse: signal name -> problem string, populated only when a
+    # signal is not healthy; an absent key means "healthy or not applicable".
+    # Current values: "model_not_configured" (features supplied but no model
+    # wired -- neutral, does not affect the decision) and "model_error" (a
+    # configured model raised at runtime -- routes to NEEDS_REVIEW via the
+    # signal's ERROR verdict, same as any other analysis failure). This is
+    # diagnostic output only; decide() never sees it. Item 6 may extend this
+    # with a "degraded" entry for partial feature extraction.
+    signal_health: dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -357,6 +367,7 @@ class ScanResult:
             "network": {"score": self.network_score, "verdict": self.network_verdict.value},
             "final_decision": self.final_decision.value,
             "reason_codes": self.reason_codes,
+            "signal_health": self.signal_health,
         }
 
 

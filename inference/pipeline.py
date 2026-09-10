@@ -26,6 +26,12 @@ Cortex-Memory and Cortex-Network as independent signals:
      extraction/scoring exception) with no malicious/suspicious signal from
      any other channel resolves to NEEDS_REVIEW, not ALERT -- "cannot
      analyze" is not a malware finding.
+     Model health (a supplied memory/network signal whose model is not wired,
+     or a configured model that raised) is recorded on
+     ScanResult.signal_health -- kept SEPARATE from the security verdict
+     (review item 10). A not-yet-deployed model stays neutral; a runtime
+     model error routes to NEEDS_REVIEW like any other analysis failure, but
+     its cause is visible in signal_health rather than only in reason_codes.
   9. structured JSON security event
 """
 
@@ -104,8 +110,10 @@ class CortexPipeline:
         # the feature vectors.
         if memory_features is not None:
             result.memory_score, result.memory_verdict = self._run_memory(memory_features)
+            self._record_signal_health(result, "memory", result.memory_verdict, self.memory_model)
         if network_features is not None:
             result.network_score, result.network_verdict = self._run_network(network_features)
+            self._record_signal_health(result, "network", result.network_verdict, self.network_model)
 
         # 2. basic input validation
         err = self._validate_path(path)
@@ -179,6 +187,30 @@ class CortexPipeline:
         result.final_decision = final
         result.reason_codes += reasons
         return result
+
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _record_signal_health(result: ScanResult, name: str, verdict, model) -> None:
+        """Record model health for `name` on result.signal_health, SEPARATE
+        from the security verdict (review item 10). Only non-healthy states
+        are written; an absent key means healthy / not applicable.
+
+          - configured model raised at runtime  -> "model_error"
+            (the signal's ERROR verdict already routes the scan to
+             NEEDS_REVIEW via decide(); this just makes "which model, why"
+             visible outside the flat reason_codes list)
+          - features supplied but no model wired -> "model_not_configured"
+            (NOT_PROVIDED: deliberately neutral -- a not-yet-deployed signal
+             must not push every scan to NEEDS_REVIEW -- but no longer
+             silent: a caller that wants fail-closed behaviour can key off
+             this field itself)
+
+        decide() never receives signal_health; this is diagnostic output only.
+        """
+        if verdict.name == "ERROR":
+            result.signal_health[name] = "model_error"
+        elif verdict.name == "NOT_PROVIDED" and model is None:
+            result.signal_health[name] = "model_not_configured"
 
     # ------------------------------------------------------------------
     def _run_memory(self, memory_features: np.ndarray) -> tuple[Optional[float], MemoryVerdict]:

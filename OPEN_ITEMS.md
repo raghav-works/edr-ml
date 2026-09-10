@@ -14,13 +14,41 @@ guarded (TOCTOU → `NEEDS_REVIEW`, not an unhandled crash). Covered by
 `tests/test_policy_engine.py` (truth table + invariants) and the new
 `tests/test_pipeline.py` (non-PE / missing / directory / oversized).
 
-Two follow-ups layer **on top of** this state, not yet done:
+## PDF review item 10 — model health separate from the security verdict — DONE
+
+`ScanResult.signal_health` (a sparse `{signal: problem}` map, serialized in
+`to_dict()` / `to_security_event()`) records analyzer/model health without
+touching `decide()`. `pipeline.scan()` populates it for the two supplied
+signals: a configured memory/network model that raises → `"model_error"`
+(its `ERROR` verdict still routes the scan to `NEEDS_REVIEW`); features
+supplied with no model wired → `"model_not_configured"`, which stays
+**neutral** (verdict `NOT_PROVIDED`, decision unchanged) — a not-yet-deployed
+signal is made visible, not escalated. Covered by `tests/test_pipeline.py`
+(model-error, unconfigured-but-neutral, and a guard that `signal_health`
+never reaches `decide()`).
+
+### Known inconsistency — behavioral config-gap (tracked, not yet decided)
+
+Memory and network treat "features supplied, no model configured" as
+**neutral** (`NOT_PROVIDED`). Behavioral does not: `_run_behavioral` returns
+`BehavioralVerdict.ERROR` when `behavioral_model` or `tokenizer` is `None`,
+which now routes to `NEEDS_REVIEW`. So the same operator mistake — supplying
+evidence for a signal whose model was never wired — is silently ignored for
+two signals and forces a review queue entry for the third. This asymmetry
+predates items 9/10 and was deliberately left in place to keep item 10
+scoped. Someone should decide, eyes open, whether behavioral's config-gap
+should also become neutral `NOT_PROVIDED` (consistent, but a not-yet-deployed
+behavioral model then stops being fail-closed) or whether memory/network
+should instead fail-closed like behavioral. Either direction is a one-signal
+change plus test updates; the point is that it should be a decision, not an
+accident.
+
+## Remaining follow-up — layers on items 9/10
+
 - **Item 6** — feature-extraction failures should return a `degraded_groups`
   list and mark a critical-group failure `NEEDS_REVIEW` explicitly (rather
-  than silently zero-filling), plus a startup self-test.
-- **Item 10** — represent memory/network model *availability* as a distinct
-  system-health signal instead of folding an unavailable/erroring model into
-  the security verdict; use `NEEDS_REVIEW` rather than a malware alert.
+  than silently zero-filling), plus a startup self-test. It will extend
+  `signal_health` with a `"degraded"` entry for `static`.
 
 ## Structural
 
