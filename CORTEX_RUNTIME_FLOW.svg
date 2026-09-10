@@ -77,7 +77,7 @@
   <text x="885" y="866" class="small" text-anchor="middle">1. Behavioral malicious → TERMINATE</text>
   <text x="885" y="889" class="small" text-anchor="middle">2. Memory/network malicious → ALERT</text>
   <text x="885" y="912" class="small" text-anchor="middle">3. Static alert/block → ALERT</text>
-  <text x="885" y="935" class="small" text-anchor="middle">4. Any active-signal error → ALERT</text>
+  <text x="885" y="935" class="small" text-anchor="middle">4. Any signal ERROR → NEEDS_REVIEW</text>
   <text x="885" y="958" class="small" text-anchor="middle">5. Otherwise → ALLOW</text>
 
   <rect x="1420" y="805" width="140" height="178" class="box final"/>

@@ -15,9 +15,18 @@ path validation → PE validation → 2568-dim feature extraction → LightGBM
               → behavioral verdict (BENIGN / MALICIOUS / PENDING)
                 (PENDING if < 10 API calls; a 10–99 call verdict is emitted
                  but flagged "behavioral_short_trace")
-        → policy engine → final decision (ALLOW / ALERT / BLOCK / TERMINATE)
+        → policy engine → final decision
+              (ALLOW / NEEDS_REVIEW / ALERT / BLOCK / TERMINATE)
         → structured JSON security event
 ```
+
+A file that **cannot be analyzed** (non-PE / missing / unreadable / oversized,
+or an exception during feature extraction or scoring) with no malicious or
+suspicious signal from any other channel resolves to **`NEEDS_REVIEW`**, not
+`ALERT` (review item 9): "could not analyze" is not a malware finding. A signal
+that *did* complete with a finding still wins — `decide(static=ERROR,
+behavioral=MALICIOUS)` is `TERMINATE` — and the failed-signal reason code is
+kept in `reason_codes` regardless.
 
 ## Layout
 ```

@@ -91,7 +91,7 @@ flowchart TD
     L --> D
     P --> D
     S --> D
-    D --> T[Final: ALLOW / ALERT / TERMINATE]
+    D --> T[Final: ALLOW / NEEDS_REVIEW / ALERT / TERMINATE]
     T --> U[Security event: scores, verdicts, reasons, timestamp]
 ```
 
@@ -104,13 +104,16 @@ flowchart TD
 
 If no supplied signal is malicious and no active signal errors, the result is
 `ALLOW`. An `ALLOW` means no active supplied signal found malicious evidence;
-it does not prove every kind of evidence was available.
+it does not prove every kind of evidence was available. If a signal instead
+*could not be analysed* (non-PE / missing / unreadable / oversized file, or an
+extraction/scoring exception) and nothing else is malicious or suspicious, the
+result is `NEEDS_REVIEW` — a separate review queue, not a malware `ALERT`.
 
 ### Inputs and ownership
 
 | Input | Who produces it | Consumer | When absent |
 |---|---|---|---|
-| `file_path` | caller | `inference/pipeline.py` | static is `ERROR`; policy alerts |
+| `file_path` | caller | `inference/pipeline.py` | static is `ERROR`; policy returns `NEEDS_REVIEW` (unless another signal is malicious/suspicious) |
 | API-call JSON (`list[str]`) | external sandbox/collector | `tokenizer/api_tokenizer.py` | behavioral is `NOT_PROVIDED` |
 | memory feature vector | external memory-dump/VolMemLyzer process | `CortexPipeline._run_memory` | memory is `NOT_PROVIDED` |
 | network feature vector | external CICFlowMeter-compatible flow process | `CortexPipeline._run_network` | network is `NOT_PROVIDED` |
@@ -177,10 +180,12 @@ Scores are never averaged. `inference/policy_engine.py::decide()` uses this firs
 2. Memory `MALICIOUS` → `ALERT`.
 3. Network `MALICIOUS` → `ALERT`.
 4. Static `ALERT` or `BLOCK` → `ALERT`.
-5. Any static, behavioral, memory, or network `ERROR` → `ALERT`.
+5. Any static, behavioral, memory, or network `ERROR` → `NEEDS_REVIEW`.
 6. Otherwise → `ALLOW`.
 
 Static `BLOCK` is intentionally interim-capped to final `ALERT`, while the static verdict remains `BLOCK` for audit and adds `static_block_capped_at_alert`. Memory and network are also capped at alert. Therefore `FinalDecision.BLOCK` exists in the enum but is not currently returned; only behavioral maliciousness can produce `TERMINATE`.
+
+`NEEDS_REVIEW` (review item 9) separates "the analyzer could not reach a verdict" from "the analyzer found something suspicious". A non-PE / missing / unreadable / oversized file, or an exception during feature extraction or scoring, no longer produces a malware `ALERT` — it produces `NEEDS_REVIEW`, which callers should route to a human / review queue (not treat as lower urgency than `ALERT`, only as a separate stream). A signal that *did* complete with a finding (rungs 1–4) always outranks another signal's failure — positive evidence beats absence of evidence — so `decide(static=ERROR, behavioral=MALICIOUS)` is still `TERMINATE`. The failed-signal reason code (`static_scan_error`, `behavioral_scan_error`, `memory_scan_error`, `network_scan_error`) is retained in `reason_codes` regardless of which rung drives the outcome. Items 6 (feature-extraction `degraded_groups`) and 10 (memory-model availability as a system-health signal) will layer on top of this state.
 
 The result contains the path, SHA-256 when bytes were read, all four score/verdict pairs, final decision, and reason codes. `to_security_event()` adds an ISO-8601 UTC timestamp and a fresh correlation UUID.
 

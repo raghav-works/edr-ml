@@ -18,9 +18,14 @@ Cortex-Memory and Cortex-Network as independent signals:
      on-disk file for steps 1-4 to evaluate. Neither derives its own
      features: the caller supplies them (no live memory or traffic capture
      exists in this repo), the same as behavioral's API-call trace.
-  8. policy engine -> final decision. Memory's and Network's authority is
-     each capped at ALERT, one rung below behavioral's TERMINATE; see
-     inference/policy_engine.py::decide() for the full reasoning.
+  8. policy engine -> final decision (ALLOW / NEEDS_REVIEW / ALERT / BLOCK /
+     TERMINATE). Memory's and Network's authority is each capped at ALERT,
+     one rung below behavioral's TERMINATE; see
+     inference/policy_engine.py::decide() for the full reasoning. A file that
+     cannot be analyzed at all (non-PE, missing, unreadable, oversized, or an
+     extraction/scoring exception) with no malicious/suspicious signal from
+     any other channel resolves to NEEDS_REVIEW, not ALERT -- "cannot
+     analyze" is not a malware finding.
   9. structured JSON security event
 """
 
@@ -112,7 +117,22 @@ class CortexPipeline:
             result.final_decision, result.reason_codes = final, result.reason_codes + reasons
             return result
 
-        bytez = path.read_bytes()
+        # _validate_path() already checked exists / is_file / stat-readable /
+        # size, but the file can still vanish or become unreadable between
+        # that check and this read (TOCTOU). Treat that as "cannot analyze"
+        # (NEEDS_REVIEW via decide()), not an unhandled exception that would
+        # produce no ScanResult at all. Reuses the "unreadable" reason code
+        # from _validate_path so triage reads both the same way.
+        try:
+            bytez = path.read_bytes()
+        except OSError:
+            logger.warning("could not read %s after path validation (I/O race?)", file_path)
+            result.static_verdict = StaticVerdict.ERROR
+            result.reason_codes.append("unreadable")
+            final, reasons = decide(result.static_verdict, result.behavioral_verdict,
+                                    result.memory_verdict, result.network_verdict)
+            result.final_decision, result.reason_codes = final, result.reason_codes + reasons
+            return result
         result.sha256 = hashlib.sha256(bytez).hexdigest()
 
         # 3. rule-based Windows PE validation

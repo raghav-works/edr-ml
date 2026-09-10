@@ -3,6 +3,25 @@
 Running tracker for known-but-deferred work. Blocking review items 1–6 are
 done (see git log); this is what remains.
 
+## PDF review item 9 — `NEEDS_REVIEW` state — DONE
+
+`FinalDecision.NEEDS_REVIEW` now sits between `ALLOW` and `ALERT`. The four
+`*Verdict.ERROR` rungs in `decide()` return `NEEDS_REVIEW` instead of `ALERT`
+(unchanged priority position — a completed malicious/suspicious finding still
+wins). `decide()` now accumulates every failed-signal reason code even when a
+higher rung drives the outcome. `pipeline.scan()`'s `path.read_bytes()` is
+guarded (TOCTOU → `NEEDS_REVIEW`, not an unhandled crash). Covered by
+`tests/test_policy_engine.py` (truth table + invariants) and the new
+`tests/test_pipeline.py` (non-PE / missing / directory / oversized).
+
+Two follow-ups layer **on top of** this state, not yet done:
+- **Item 6** — feature-extraction failures should return a `degraded_groups`
+  list and mark a critical-group failure `NEEDS_REVIEW` explicitly (rather
+  than silently zero-filling), plus a startup self-test.
+- **Item 10** — represent memory/network model *availability* as a distinct
+  system-health signal instead of folding an unavailable/erroring model into
+  the security verdict; use `NEEDS_REVIEW` rather than a malware alert.
+
 ## Structural
 
 - **Feature-parity harness for `pe_features.py`** — MVP DONE

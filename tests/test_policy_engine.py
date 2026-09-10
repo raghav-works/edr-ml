@@ -64,12 +64,19 @@ CASES = [
     ((S.ALLOW, B.BENIGN, NM, N.MALICIOUS), F.ALERT, "network_malicious"),
     ((S.ALLOW, B.BENIGN, M.MALICIOUS, N.MALICIOUS), F.ALERT, "memory_malicious"),
 
-    # item 6: NOT_PROVIDED is neutral; ERROR is fail-closed ALERT
+    # item 6: NOT_PROVIDED is neutral. item 9: a lone ERROR (nothing malicious
+    # or suspicious from any channel) -> NEEDS_REVIEW, not ALERT.
     ((S.ALLOW, B.BENIGN, M.NOT_PROVIDED, N.NOT_PROVIDED), F.ALLOW, "no_malicious_evidence"),
-    ((S.ALLOW, B.BENIGN, M.ERROR, NN), F.ALERT, "memory_scan_error"),
-    ((S.ALLOW, B.BENIGN, NM, N.ERROR), F.ALERT, "network_scan_error"),
-    ((S.ERROR, B.NOT_PROVIDED, NM, NN), F.ALERT, "static_scan_error"),
-    ((S.ALLOW, B.ERROR, NM, NN), F.ALERT, "behavioral_scan_error"),
+    ((S.ALLOW, B.BENIGN, M.ERROR, NN), F.NEEDS_REVIEW, "memory_scan_error"),
+    ((S.ALLOW, B.BENIGN, NM, N.ERROR), F.NEEDS_REVIEW, "network_scan_error"),
+    ((S.ERROR, B.NOT_PROVIDED, NM, NN), F.NEEDS_REVIEW, "static_scan_error"),
+    ((S.ALLOW, B.ERROR, NM, NN), F.NEEDS_REVIEW, "behavioral_scan_error"),
+
+    # item 9: a completed malicious/suspicious signal still wins over another
+    # signal's ERROR; the failed-signal code is retained in the reasons list.
+    ((S.ERROR, B.MALICIOUS, NM, NN), F.TERMINATE, "static_scan_error"),
+    ((S.ERROR, B.BENIGN, M.MALICIOUS, NN), F.ALERT, "static_scan_error"),
+    ((S.ALERT, B.NOT_PROVIDED, NM, N.ERROR), F.ALERT, "network_scan_error"),
 
     # priority: behavioral MALICIOUS (TERMINATE) beats memory/network MALICIOUS (ALERT)
     ((S.ALLOW, B.MALICIOUS, M.MALICIOUS, N.MALICIOUS), F.TERMINATE, "behavioral_malicious"),
@@ -122,14 +129,69 @@ def test_not_provided_is_neutral_for_memory_and_network():
         assert decide(s, b)[0] == decide(s, b, M.NOT_PROVIDED, N.NOT_PROVIDED)[0]
 
 
-def test_error_forces_at_least_alert():
+def test_lone_error_returns_needs_review():
+    """item 9: an ERROR from any single signal, with nothing malicious or
+    suspicious from any channel, resolves to NEEDS_REVIEW -- was ALERT
+    pre-item-9, and never ALLOW."""
     for bad in (
         (S.ALLOW, B.BENIGN, M.ERROR, N.NOT_PROVIDED),
         (S.ALLOW, B.BENIGN, M.NOT_PROVIDED, N.ERROR),
         (S.ALLOW, B.ERROR, M.NOT_PROVIDED, N.NOT_PROVIDED),
         (S.ERROR, B.NOT_PROVIDED, M.NOT_PROVIDED, N.NOT_PROVIDED),
     ):
-        assert decide(*bad)[0] == F.ALERT
+        assert decide(*bad)[0] == F.NEEDS_REVIEW
+
+
+def test_error_returns_needs_review():
+    """item 9 invariant over the whole product: decide() returns NEEDS_REVIEW
+    exactly when some signal is in ERROR AND no channel produced a completed
+    finding (behavioral/memory/network MALICIOUS, or static ALERT/BLOCK).
+    A completed finding always outranks another signal's failure."""
+    for s, b, m, n in _ALL:
+        any_error = (
+            s == S.ERROR or b == B.ERROR or m == M.ERROR or n == N.ERROR
+        )
+        any_finding = (
+            b == B.MALICIOUS or m == M.MALICIOUS or n == N.MALICIOUS
+            or s in (S.ALERT, S.BLOCK)
+        )
+        expected = any_error and not any_finding
+        assert (decide(s, b, m, n)[0] == F.NEEDS_REVIEW) == expected
+
+
+def test_malicious_signal_wins_over_other_signal_error():
+    """item 9: a signal that completed with a finding beats another signal's
+    ERROR -- outcome is unchanged from pre-item-9. The failed-signal reason
+    code is still recorded (audit-trail accumulation), and the code for the
+    rung that drove the outcome is listed first."""
+    final, reasons = decide(S.ERROR, B.MALICIOUS, NM, NN)
+    assert final == F.TERMINATE
+    assert reasons[0] == "behavioral_malicious"
+    assert "static_scan_error" in reasons
+
+    final, reasons = decide(S.ERROR, B.BENIGN, M.MALICIOUS, NN)
+    assert final == F.ALERT
+    assert reasons[0] == "memory_malicious"
+    assert "static_scan_error" in reasons
+
+
+def test_error_codes_accumulate():
+    """Every signal in ERROR contributes its code, even when a higher rung
+    decides the outcome. Regression: decide() used to return on the first
+    ERROR rung and silently drop the rest."""
+    final, reasons = decide(S.ERROR, B.ERROR, M.ERROR, N.ERROR)
+    assert final == F.NEEDS_REVIEW
+    assert set(reasons) == {
+        "static_scan_error", "behavioral_scan_error",
+        "memory_scan_error", "network_scan_error",
+    }
+
+    final, reasons = decide(S.ERROR, B.MALICIOUS, M.ERROR, N.ERROR)
+    assert final == F.TERMINATE
+    assert reasons[0] == "behavioral_malicious"
+    assert set(reasons[1:]) == {
+        "static_scan_error", "memory_scan_error", "network_scan_error",
+    }
 
 
 def test_capped_block_reason_code():

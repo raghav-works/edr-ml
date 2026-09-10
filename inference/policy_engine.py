@@ -273,6 +273,13 @@ class EmulationVerdict(str, enum.Enum):
 
 class FinalDecision(str, enum.Enum):
     ALLOW = "ALLOW"
+    # NEEDS_REVIEW: analysis could not complete for at least one signal
+    # (non-PE / missing / unreadable / oversized file, or an exception during
+    # feature extraction or scoring) AND no channel that DID complete produced
+    # malicious or suspicious evidence. Distinct from ALERT ("we found
+    # suspicious evidence") -- "we could not analyze this" must not be
+    # reported as a malware finding. Sits between ALLOW and ALERT in severity.
+    NEEDS_REVIEW = "NEEDS_REVIEW"
     ALERT = "ALERT"
     BLOCK = "BLOCK"
     TERMINATE = "TERMINATE"
@@ -334,7 +341,10 @@ class ScanResult:
     memory_verdict: MemoryVerdict = MemoryVerdict.NOT_PROVIDED
     network_score: Optional[float] = None
     network_verdict: NetworkVerdict = NetworkVerdict.NOT_PROVIDED
-    final_decision: FinalDecision = FinalDecision.ALERT
+    # Default is NEEDS_REVIEW, not ALERT: an un-populated result means "nothing
+    # ran to completion", which is precisely the NEEDS_REVIEW case, not a
+    # malware finding. static_verdict stays ERROR ("nothing ran yet").
+    final_decision: FinalDecision = FinalDecision.NEEDS_REVIEW
     reason_codes: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -364,11 +374,35 @@ def decide(
         4. static ALERT  or  BLOCK   -> ALERT           (BLOCK is INTERIM-
                                                          CAPPED to ALERT --
                                                          see below)
-        5. static ERROR              -> ALERT
-        6. behavioral ERROR          -> ALERT
-        7. memory ERROR              -> ALERT
-        8. network ERROR             -> ALERT
-        9. otherwise                 -> ALLOW
+        5. any static / behavioral / memory / network ERROR -> NEEDS_REVIEW
+        6. otherwise                 -> ALLOW
+
+    Reason-code accumulation
+    -----------------------
+    The ERROR check at rung 5 does NOT drive the outcome on its own when a
+    higher rung fires -- but the failed-signal reason code(s) are still
+    collected and returned. Every signal in the ERROR state contributes its
+    code (`static_scan_error`, `behavioral_scan_error`, `memory_scan_error`,
+    `network_scan_error`) to the returned `reasons` list regardless of which
+    rung decides the outcome; the code for the rung that actually fired is
+    listed first. So `decide(ERROR, MALICIOUS, ...)` still returns TERMINATE,
+    but `reasons` is `["behavioral_malicious", "static_scan_error"]` rather
+    than dropping the static failure. This is audit-trail only -- it never
+    changes the FinalDecision.
+
+    "Cannot analyze" is not "malware" (review item 9)
+    ------------------------------------------------
+    Rung 5 returns NEEDS_REVIEW, not ALERT: a non-PE / missing / unreadable /
+    oversized file, or an exception during feature extraction or scoring,
+    means the analyzer could not reach a verdict -- it is NOT evidence of
+    maliciousness. NEEDS_REVIEW keeps those out of the malware-alert stream
+    while still routing them to a human / review queue (it must not be
+    treated as quieter than ALERT operationally, only as a separate queue).
+    A signal that DID complete and found something (rungs 1-4) always wins
+    over a different signal's failure -- positive evidence outranks absence
+    of evidence. Items 6 (feature-extraction `degraded_groups`) and 10
+    (memory model availability as a system-health signal) layer on top of
+    this state; they are not implemented here.
 
     INTERIM CAP on Cortex-Static's BLOCK authority (added 2026-09-08)
     ---------------------------------------------------------------
@@ -473,8 +507,31 @@ def decide(
     numbers look good -- they already do, and that's exactly the case this
     cap exists for.
     """
+    # Record every signal currently in the ERROR state, up-front and
+    # independent of which rung drives the outcome. decide() returns on first
+    # match, so without collecting these first a higher-priority result (e.g.
+    # behavioral TERMINATE) would silently drop the fact that a lower-priority
+    # signal also failed to run. This affects the audit trail ONLY -- the
+    # priority chain below consults `reasons` for the OUTCOME exactly where
+    # the old per-signal ERROR rungs sat (after every malicious/suspicious
+    # check, before ALLOW), and now yields NEEDS_REVIEW instead of ALERT.
+    #
+    # Each signal's verdict is a single enum value, and ERROR is mutually
+    # exclusive with MALICIOUS / ALERT / BLOCK, so a given signal contributes
+    # to at most one of "driver reason" or this list -- never both.
     reasons: list[str] = []
+    if static_verdict == StaticVerdict.ERROR:
+        reasons.append("static_scan_error")
+    if behavioral_verdict == BehavioralVerdict.ERROR:
+        reasons.append("behavioral_scan_error")
+    if memory_verdict == MemoryVerdict.ERROR:
+        reasons.append("memory_scan_error")
+    if network_verdict == NetworkVerdict.ERROR:
+        reasons.append("network_scan_error")
 
+    # Priority chain -- first match decides the OUTCOME. The reason code for
+    # the rung that fired is listed first, then any error codes from above.
+    #
     # Cortex-Static's BLOCK verdict is NOT an autonomous top-priority block.
     # It is interim-capped to ALERT (see this function's docstring for the
     # evidence and the removal criteria) and handled together with static
@@ -482,42 +539,28 @@ def decide(
     # behavioral signal can still escalate the same file to TERMINATE.
 
     if behavioral_verdict == BehavioralVerdict.MALICIOUS:
-        reasons.append("behavioral_malicious")
-        return FinalDecision.TERMINATE, reasons
+        return FinalDecision.TERMINATE, ["behavioral_malicious", *reasons]
 
     if memory_verdict == MemoryVerdict.MALICIOUS:
-        reasons.append("memory_malicious")
-        return FinalDecision.ALERT, reasons
+        return FinalDecision.ALERT, ["memory_malicious", *reasons]
 
     if network_verdict == NetworkVerdict.MALICIOUS:
-        reasons.append("network_malicious")
-        return FinalDecision.ALERT, reasons
+        return FinalDecision.ALERT, ["network_malicious", *reasons]
 
     if static_verdict in (StaticVerdict.ALERT, StaticVerdict.BLOCK):
         # static BLOCK demoted to ALERT (interim cap); the distinct reason
         # code keeps the demotion visible in the audit trail.
-        reasons.append(
+        driver = (
             "static_block_capped_at_alert"
             if static_verdict == StaticVerdict.BLOCK
             else "static_alert"
         )
-        return FinalDecision.ALERT, reasons
+        return FinalDecision.ALERT, [driver, *reasons]
 
-    if static_verdict == StaticVerdict.ERROR:
-        reasons.append("static_scan_error")
-        return FinalDecision.ALERT, reasons
+    # No malicious or suspicious evidence from any channel that completed.
+    if reasons:
+        # One or more signals could not be analyzed at all -- route to a
+        # human / review queue, NOT the malware-alert stream (review item 9).
+        return FinalDecision.NEEDS_REVIEW, reasons
 
-    if behavioral_verdict == BehavioralVerdict.ERROR:
-        reasons.append("behavioral_scan_error")
-        return FinalDecision.ALERT, reasons
-
-    if memory_verdict == MemoryVerdict.ERROR:
-        reasons.append("memory_scan_error")
-        return FinalDecision.ALERT, reasons
-
-    if network_verdict == NetworkVerdict.ERROR:
-        reasons.append("network_scan_error")
-        return FinalDecision.ALERT, reasons
-
-    reasons.append("no_malicious_evidence")
-    return FinalDecision.ALLOW, reasons
+    return FinalDecision.ALLOW, ["no_malicious_evidence"]
