@@ -111,14 +111,36 @@ source of truth, not a duplicated copy) and `CortexPipeline(self_test=True)`
 non-critical noise. Covered by `tests/test_pipeline.py` and
 `tests/test_static_feature_parity.py`.
 
-### Dependency pinning — deferred to item 7's parity cluster
+### Dependency pinning — RESOLVED 2026-09-18
 
-The PDF's item 6 also says "pin dependency versions". Only `signify` has an
-upper bound today; `pefile` and `scikit-learn` (whose `FeatureHasher` hashing
-is parity-critical) are lower-bound only. Tightening `scikit-learn` needs a
-`FeatureHasher` hash-stability re-check, which belongs with the `thrember`
-parity cross-check (item 7 in the Structural section below), not a standalone
-change. Tracked there, not forgotten.
+The PDF's item 6 also says "pin dependency versions". Only `signify` had an
+upper bound; `pefile` and `scikit-learn` (whose `FeatureHasher` hashing is
+parity-critical) were lower-bound only. This was originally deferred to item
+7's `thrember` parity cluster since tightening `scikit-learn` needs a
+`FeatureHasher` hash-stability re-check — but that re-check doesn't actually
+depend on `thrember`/`signify` availability, so it was done standalone
+instead of waiting on item 7's unrelated `signify` version conflict:
+
+- **`scikit-learn>=1.4,<2.0`** — the hash-stability re-check found no risk:
+  `FeatureHasher` (the exact call shapes `pe_features.py` uses) produces
+  byte-identical output across 1.4.0..1.7.2, verified directly in isolated
+  venvs, not assumed. The upper bound is precautionary for the untested next
+  major line, not a known incompatibility.
+- **`pefile>=2023.2.7,<2025`** — a real, different finding: pefile 2024.8.26
+  (current latest, no newer release since Aug 2024) added an unconditional
+  `gc.collect()` to `PE.close()`, which `pe_features.py` calls on every scan
+  reaching static feature extraction. Confirmed by reading pefile's own
+  source (not assumed) and independently corroborated
+  (`erocarrera/pefile#420`, `pyinstaller#8762`). Measured directly against
+  this repo's own fixture: ~1.04x overhead per scan (~18.2ms vs ~17.5ms) --
+  real but modest at this process's object-graph size, smaller than the
+  externally-reported regression (measured in a much larger, longer-lived
+  object graph). Pinned with an upper bound and the finding documented in
+  `requirements.txt` so a future bump is a deliberate re-check, same posture
+  as the existing `signify` pin.
+
+Full requirements.txt reasoning lives as comments next to each pin, not just
+here.
 
 ## Structural
 

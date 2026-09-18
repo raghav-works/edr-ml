@@ -1,12 +1,26 @@
 # Core
 numpy>=1.26
 pandas>=2.2
-scikit-learn>=1.4
+scikit-learn>=1.4,<2.0   # FeatureHasher is parity-critical (features/pe_features.py's
+# hashed feature groups). Verified directly, not assumed: identical FeatureHasher
+# output (byte-for-byte, same call shapes as pe_features.py) across 1.4.0..1.7.2
+# in isolated venvs. Upper bound is a precaution for the untested next major line,
+# not a known break -- bump deliberately, with the same hash-stability re-check.
 pyyaml>=6.0
 
 # Static model
 lightgbm>=4.3
-pefile>=2023.2.7
+pefile>=2023.2.7,<2025   # 2024.8.26 (current latest) added an unconditional
+# gc.collect() in PE.close()/_close_data() -- confirmed by reading pefile's own
+# source, not assumed. pe_features.py calls pe.close() on every scan that reaches
+# static feature extraction, so this runs once per scan. Measured directly against
+# this repo's own fixture (200 iterations, gc.collect() patched to a no-op vs not):
+# ~1.04x overhead (~18.2ms vs ~17.5ms per parse+close) -- real, but modest at this
+# process's object-graph size; PyInstaller's independently-reported regression
+# (erocarrera/pefile#420, pyinstaller#8762) was measured in a much larger,
+# longer-lived object graph. Upper bound so a future release -- possibly with a
+# fix, possibly with more of the same -- is a deliberate re-check, not a silent
+# upgrade.
 signify>=0.9,<0.10   # REQUIRED for the 8-dim authenticode feature group.
 # features/pe_features.py targets the 0.9.x AuthenticodeFile API. A 0.6-0.8
 # install lacks it; without the pin the group silently returned all-zeros --
