@@ -308,9 +308,10 @@ re-validation — separate from the split-discipline retrain above.
 
 ## Static false-positive severity cluster — allowlist + corroboration-aware decisioning — design agreed 2026-09-18
 
-**Status (2026-09-18): Addition A DONE (see "Addition A — DONE" below).
-B1 in progress next. B2's mechanism is decided (see "Addition B" below) but
-not yet implemented.** Two additions, agreed in this order, motivated by a
+**Status (2026-09-18): DONE — Addition A, B1, and B2 all implemented, tested,
+and committed** (see "Addition A — DONE" and "Addition B — DONE" below for
+the full write-ups; commits `383edf1`, `3749989`, `3449503`, `b6efb22`,
+`ac132d2`, in that order). Two additions, agreed in this order, motivated by a
 severity distinction the current system doesn't make: static's known false positives
 (the PyInstaller-packed / atypical-large-PE pattern behind item 2's BLOCK
 cap, see "Cortex-Static: PE-file model" above) sometimes land on files the
@@ -500,7 +501,7 @@ new — `test_authenticode_trust.py` (6), `test_nsrl_allowlist.py` (7),
 `test_download_nsrl.py` (6), and `test_pipeline.py`'s new allowlist section
 (6) — verified by exact count against the baseline commit, not estimated).
 
-### Addition B — corroboration-aware decision logic (after A)
+### Addition B — corroboration-aware decision logic (after A) — DONE
 
 **B1 — corroboration as a reason-code signal, not a blended score.**
 `decide()`'s existing priority rungs already let memory `MALICIOUS` and
@@ -589,18 +590,72 @@ positive* evidence unlock `BLOCK` sooner on files where multiple signals
 happen to be available and agree; the latter is what would eventually let
 `BLOCK` stand on static's evidence alone.
 
+#### Addition B — implementation summary (2026-09-18)
+
+Built exactly as designed above, in two commits:
+
+- **B1** (`b6efb22`) — `decide()` computes `corroborating_signals` up front
+  (the same "before the priority chain, independent of which rung fires"
+  pattern as the existing ERROR-reason collection): `static` counted when
+  `static_verdict in (ALERT, BLOCK)`, `memory`/`network` counted when
+  `MALICIOUS`. `len(...) >= 2` appends `corroborated_multi_signal` to
+  `reasons` at all four malicious/suspicious return points (including the
+  `TERMINATE` one, for audit completeness — corroboration cannot change
+  that outcome but is still useful information there). Purely additive to
+  `reason_codes`; behavioral is deliberately excluded from the set, since
+  it already has independent uncapped authority and needs neither to
+  corroborate nor be corroborated.
+- **B2** (`ac132d2`) — one new rung reusing B1's `corroborating_signals`
+  directly: `if static_verdict == StaticVerdict.BLOCK and
+  len(corroborating_signals) >= 2: return FinalDecision.BLOCK, [...]`,
+  inserted immediately after the behavioral-`TERMINATE` check and
+  **before** the memory/network `ALERT` rungs. That placement is required,
+  not stylistic: `decide()` returns on first match, and memory/network's
+  own rungs would otherwise silently pre-empt a corroborated static
+  `BLOCK` by returning `ALERT` first — exactly the bug the "implementation
+  correctness note" above was recorded to prevent.
+
+**Critical constraint — proven, not just implemented:** the escalation
+rung is gated on `static_verdict == StaticVerdict.BLOCK`, so memory/network
+`MALICIOUS` with static anything else falls through unchanged to their own
+`ALERT`-only rungs. `tests/test_policy_engine.py::
+test_memory_or_network_alone_can_never_reach_block` checks this across the
+**entire** verdict cartesian product (`_ALL`, every combination of all four
+signals), not hand-picked cases — there is no combination anywhere in the
+state space where memory or network reaches `BLOCK`/`TERMINATE` on their
+own. Companion load-bearing tests: `test_memory_corroborates_static_block`,
+`test_network_corroborates_static_block`,
+`test_both_memory_and_network_corroborate_static_block_once`,
+`test_behavioral_terminate_still_outranks_corroborated_block`,
+`test_static_alert_never_escalates_to_block_even_when_corroborated`, and
+`test_uncorroborated_block_still_demotes_to_alert` (the static-only,
+zero-benefit case, including the exact `(NOT_PROVIDED, NOT_PROVIDED)`
+no-other-signals-supplied row).
+
+**Pre-existing tests that had to change, not just new ones added:** four
+tests encoded the pre-B2 "`decide()` never returns `BLOCK`" invariant
+across the full verdict product and would have silently masked a real
+regression if left alone: `test_decide_never_returns_block` (rewritten as
+`test_decide_returns_block_iff_static_block_is_corroborated`),
+`test_network_alone_never_escalates_past_alert`,
+`test_memory_alone_never_escalates_past_alert`, and two `CASES`
+truth-table rows. One B1-era test
+(`test_two_signals_corroborate_without_changing_outcome`) had its
+static-BLOCK-plus-network case swapped for a static-ALERT one, since that
+specific combination is exactly what B2 now intentionally changes.
+
+Full suite green throughout: 148 (post-A) → 155 (post-B1+B2) passed, zero
+regressions.
+
 ### Next steps
 
-- Addition A: `data/download_nsrl.py` (or equivalent), the standalone
-  `verify_trusted_chain()` function, `pipeline.py` step 3b, and tests
-  (allowlist hit/miss, chain-verify success/failure/parse-error, and a check
-  that memory/network/behavioral are provably unaffected by an allowlist
-  `ALLOW`). **Proceeding to implementation scoping now.**
-- Addition B1: additive, low-risk, no structural-policy question attached.
-  **Proceeding to implementation scoping now**, alongside A.
-- Addition B2: mechanism decided (above) but implementation not yet
-  requested — the priority-chain restructuring note above should be
-  reread at that time; not scoped further this pass.
+None remaining for this tracked item — Addition A, B1, and B2 are complete.
+Two things intentionally NOT done here, both flagged above as deliberate:
+emulation stays excluded from all of this pending its own retrain/
+re-validation, and item 2's original removal criteria (thrember parity +
+skew closure + real-world validation) remain the only path to static
+regaining trust when acting alone with no corroboration available — this
+work does not touch or shortcut those criteria.
 
 ## Cleanup
 
