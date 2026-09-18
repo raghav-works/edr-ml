@@ -20,6 +20,7 @@ torch>=2.2
 # Dataset
 datasets>=2.19   # HuggingFace, for joyce8/EMBER2024
 pyarrow>=15.0    # parquet I/O
+requests>=2.31   # data/download_nsrl.py: NSRL RDS zip fetch
 
 # Export / quantization
 onnx>=1.16
