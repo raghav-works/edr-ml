@@ -261,6 +261,16 @@ class CortexPipeline:
                 and api_calls_json_path is not None):
             (result.behavioral_score, result.behavioral_verdict,
              beh_note) = self._run_behavioral(api_calls_json_path)
+            # _record_signal_health's "not configured" check is `model is
+            # None`; behavioral's not-configured condition is
+            # `behavioral_model is None or tokenizer is None` (see
+            # _run_behavioral), so mirror that here rather than passing
+            # self.behavioral_model alone -- a tokenizer-only config gap
+            # must be flagged too, not just a missing model.
+            configured_behavioral = (
+                self.behavioral_model if self.tokenizer is not None else None
+            )
+            self._record_signal_health(result, "behavioral", result.behavioral_verdict, configured_behavioral)
             if beh_note is not None:
                 result.reason_codes.append(beh_note)
         # else: static ERROR, or no api_calls_json_path -> behavioral stays NOT_PROVIDED
@@ -388,9 +398,14 @@ class CortexPipeline:
         Sequences with < MIN_SEQ_LEN (10) real calls stay PENDING: below that
         the model is non-discriminative (val+test AUC 0.66, 0/4 malicious
         detected), so PENDING is the honest answer, not a limitation.
+
+        No behavioral_model/tokenizer configured is a config gap, not a scan
+        failure -- mirrors _run_memory/_run_network: NOT_PROVIDED is neutral
+        in decide() (a not-yet-deployed signal must not force every scan to
+        NEEDS_REVIEW); ERROR is reserved for a real runtime failure below.
         """
         if self.behavioral_model is None or self.tokenizer is None:
-            return None, BehavioralVerdict.ERROR, None
+            return None, BehavioralVerdict.NOT_PROVIDED, None
         try:
             calls = load_api_calls_json(api_calls_json_path)
             token_ids, status = self.tokenizer.encode(calls)

@@ -7,10 +7,12 @@ End-to-end pipeline coverage for:
     CortexPipeline.scan() before the static model is ever invoked.
 
   * review item 10 -- model health is recorded on ScanResult.signal_health,
-    SEPARATE from the security verdict. A configured memory/network model
-    that raises at runtime -> "model_error" (and NEEDS_REVIEW via its ERROR
-    verdict); memory/network features supplied with no model wired ->
-    "model_not_configured" AND the decision is unchanged (neutral).
+    SEPARATE from the security verdict. A configured memory/network/
+    behavioral model that raises at runtime -> "model_error" (and
+    NEEDS_REVIEW via its ERROR verdict); evidence supplied with no model
+    wired -> "model_not_configured" AND the decision is unchanged (neutral)
+    -- consistent across all three signals (OPEN_ITEMS.md's tracked
+    behavioral config-gap asymmetry, resolved).
 
   * review item 6 -- a degraded feature group is recorded on
     ScanResult.degraded_groups. A degraded CRITICAL group sets
@@ -30,7 +32,7 @@ import pytest
 from features.authenticode_trust import AuthenticodeTrustResult
 from inference.pipeline import MAX_FILE_SIZE_BYTES, CortexPipeline
 from inference.policy_engine import (
-    FinalDecision, MemoryVerdict, NetworkVerdict, StaticVerdict,
+    BehavioralVerdict, FinalDecision, MemoryVerdict, NetworkVerdict, StaticVerdict,
 )
 
 _VALID_PE = os.path.join(
@@ -215,6 +217,27 @@ def test_network_features_without_model_is_visible_but_neutral():
     assert with_feats.final_decision == baseline.final_decision == FinalDecision.ALLOW
     assert with_feats.reason_codes == baseline.reason_codes
     assert with_feats.signal_health == {"network": "model_not_configured"}
+
+
+def test_behavioral_trace_without_model_is_visible_but_neutral(tmp_path):
+    """An API-call trace supplied, no behavioral_model/tokenizer wired: this
+    used to be BehavioralVerdict.ERROR (-> NEEDS_REVIEW), the one asymmetry
+    against memory/network's NOT_PROVIDED-is-neutral design (item 10).
+    Fixed to match: NOT_PROVIDED, decision unchanged, and now visible via
+    signal_health the same way memory/network already are."""
+    trace = tmp_path / "trace.json"
+    trace.write_text('["NtCreateFile", "NtWriteFile"]')
+
+    pipe = _pipe(static_model=_BenignStaticModel())  # behavioral_model=None, tokenizer=None
+
+    baseline = pipe.scan(_VALID_PE)
+    with_trace = pipe.scan(_VALID_PE, api_calls_json_path=str(trace))
+
+    assert with_trace.behavioral_verdict == BehavioralVerdict.NOT_PROVIDED
+    assert with_trace.final_decision == baseline.final_decision == FinalDecision.ALLOW
+    assert with_trace.reason_codes == baseline.reason_codes
+    assert with_trace.signal_health == {"behavioral": "model_not_configured"}
+    assert baseline.signal_health == {}
 
 
 def test_signal_health_does_not_reach_decide():

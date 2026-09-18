@@ -30,11 +30,12 @@ kept in `reason_codes` regardless.
 
 Model/analyzer health is reported on `ScanResult.signal_health`, kept
 **separate from the security verdict** (review item 10): a configured
-memory/network model that raises at runtime is flagged `"model_error"` (and
-routes to `NEEDS_REVIEW` via its `ERROR` verdict); memory/network features
-supplied with no model wired are flagged `"model_not_configured"` **without**
-changing the decision — a not-yet-deployed signal is made visible, not
-escalated.
+memory/network/behavioral model that raises at runtime is flagged
+`"model_error"` (and routes to `NEEDS_REVIEW` via its `ERROR` verdict);
+memory/network/behavioral evidence supplied with no model wired is flagged
+`"model_not_configured"` **without** changing the decision — a
+not-yet-deployed signal is made visible, not escalated. All three signals
+behave identically here.
 
 A feature group that fails extraction is listed in `ScanResult.degraded_groups`
 instead of silently becoming a zero vector (review item 6). A degraded

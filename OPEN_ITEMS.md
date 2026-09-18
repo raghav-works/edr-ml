@@ -27,21 +27,30 @@ signal is made visible, not escalated. Covered by `tests/test_pipeline.py`
 (model-error, unconfigured-but-neutral, and a guard that `signal_health`
 never reaches `decide()`).
 
-### Known inconsistency — behavioral config-gap (tracked, not yet decided)
+### Known inconsistency — behavioral config-gap — RESOLVED 2026-09-18
 
-Memory and network treat "features supplied, no model configured" as
-**neutral** (`NOT_PROVIDED`). Behavioral does not: `_run_behavioral` returns
-`BehavioralVerdict.ERROR` when `behavioral_model` or `tokenizer` is `None`,
-which now routes to `NEEDS_REVIEW`. So the same operator mistake — supplying
-evidence for a signal whose model was never wired — is silently ignored for
-two signals and forces a review queue entry for the third. This asymmetry
-predates items 9/10 and was deliberately left in place to keep item 10
-scoped. Someone should decide, eyes open, whether behavioral's config-gap
-should also become neutral `NOT_PROVIDED` (consistent, but a not-yet-deployed
-behavioral model then stops being fail-closed) or whether memory/network
-should instead fail-closed like behavioral. Either direction is a one-signal
-change plus test updates; the point is that it should be a decision, not an
-accident.
+Memory and network treated "features supplied, no model configured" as
+**neutral** (`NOT_PROVIDED`); behavioral instead returned
+`BehavioralVerdict.ERROR` when `behavioral_model` or `tokenizer` was `None`,
+which routed to `NEEDS_REVIEW` — the same operator mistake (supplying
+evidence for a signal whose model was never wired) was silently ignored for
+two signals and forced a review queue entry for the third. This asymmetry
+predated items 9/10 and was deliberately left in place at the time to keep
+item 10 scoped.
+
+**Decided: behavioral becomes neutral, matching memory/network** — not the
+reverse. `_run_behavioral`'s no-model-or-tokenizer branch now returns
+`BehavioralVerdict.NOT_PROVIDED` instead of `ERROR` (the actual-exception
+branch is untouched and still returns `ERROR`, matching memory/network's own
+exception handling); `scan()` now also calls `_record_signal_health` for
+behavioral (it never did before this fix), so a behavioral config gap is
+visible via `signal_health["behavioral"] = "model_not_configured"` the same
+way memory/network already were. Behavioral's *uncapped* authority when it
+does run (`MALICIOUS` -> `TERMINATE`, no ALERT cap) is unaffected — this only
+changes what "not deployed yet" means, not what "deployed and positive"
+means. Covered by
+`tests/test_pipeline.py::test_behavioral_trace_without_model_is_visible_but_neutral`,
+mirroring the existing memory/network item-10 tests.
 
 ## PDF review item 4 — deployment-prevalence evaluation — DONE (per-signal)
 
