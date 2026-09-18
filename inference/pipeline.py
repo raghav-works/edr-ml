@@ -7,6 +7,14 @@ Cortex-Memory and Cortex-Network as independent signals:
   3. SHA-256 + feature extraction (2568-dim EMBER2024-compatible). A feature
      group that fails extraction is recorded in ScanResult.degraded_groups
      instead of silently becoming a zero vector (review item 6).
+  3b. known-file allowlist (OPEN_ITEMS.md "Static false-positive severity
+     cluster"): an NSRL SHA-256 hash match or a real Authenticode
+     chain-verification pass (features/authenticode_trust.py -- NOT the
+     presence-only authenticode ML feature) sets static_verdict = ALLOW
+     directly and skips step 4 entirely for this file. Deliberately bypasses
+     ONLY static's own judgment (both its ML score and its feature-
+     degradation check below); memory, network, and behavioral all run
+     exactly as they do on any other file, allowlisted or not.
   4. Cortex-Static LightGBM -> static score -> ALLOW/ALERT/BLOCK. If a
      CRITICAL feature group degraded, the score is not trusted: static_verdict
      becomes ERROR (-> NEEDS_REVIEW) with reason static_features_degraded.
@@ -50,6 +58,8 @@ from typing import Optional
 
 import numpy as np
 
+from features.authenticode_trust import verify_trusted_chain
+from features.nsrl_allowlist import NSRLAllowlist
 from features.pe_features import CRITICAL_FEATURE_GROUPS, PEFeatureExtractor
 from inference.policy_engine import (
     BehavioralVerdict, FinalDecision, MemoryVerdict, NetworkVerdict, ScanResult, StaticVerdict,
@@ -67,7 +77,8 @@ MAX_FILE_SIZE_BYTES = 100 * 1024 * 1024  # 100 MiB
 class CortexPipeline:
     def __init__(self, static_model: LGBMModel, behavioral_model=None,
                  tokenizer: Optional[ApiTokenizer] = None, memory_model=None,
-                 network_model=None, device: str = "cpu", self_test: bool = True):
+                 network_model=None, nsrl_allowlist: Optional[NSRLAllowlist] = None,
+                 device: str = "cpu", self_test: bool = True):
         self.static_model = static_model
         self.behavioral_model = behavioral_model
         self.tokenizer = tokenizer
@@ -79,6 +90,14 @@ class CortexPipeline:
         # when the corresponding *_features argument is passed.
         self.memory_model = memory_model
         self.network_model = network_model
+        # nsrl_allowlist is optional (data/download_nsrl.py builds the
+        # artifact, features/nsrl_allowlist.py::NSRLAllowlist.load() loads
+        # it). None means that leg of the known-file allowlist (step 3b in
+        # scan(), OPEN_ITEMS.md "Static false-positive severity cluster")
+        # is skipped -- the Authenticode chain-verification leg still runs
+        # (it needs no external artifact), and if that also misses, static
+        # falls through to its normal ML judgment, exactly as today.
+        self.nsrl_allowlist = nsrl_allowlist
         self.device = device
         self.feature_extractor = PEFeatureExtractor()
 
@@ -181,17 +200,44 @@ class CortexPipeline:
             result.final_decision, result.reason_codes = final, result.reason_codes + reasons
             return result
 
-        # 4-5. static feature extraction + LightGBM
-        try:
-            vec, degraded = self.feature_extractor.feature_vector_with_report(bytez)
-            result.degraded_groups = degraded
-            static_score = float(self.static_model.predict_proba(vec.reshape(1, -1))[0])
-            result.static_score = static_score
-            result.static_verdict = static_verdict_from_score(static_score)
-        except Exception:
-            logger.exception("static scan failed for %s", file_path)
-            result.static_verdict = StaticVerdict.ERROR
-            result.reason_codes.append("static_scan_exception")
+        # 3b. known-file allowlist (OPEN_ITEMS.md "Static false-positive
+        # severity cluster", addition A) -- a rule-based check that runs
+        # BEFORE static's ML judgment, not an ML feature. A match sets
+        # static_verdict = ALLOW directly and skips step 4-5 (feature
+        # extraction + LightGBM scoring) ENTIRELY for this file: static's
+        # own judgment -- both its ML score AND its feature-degradation
+        # check below -- is deliberately set aside for a file independently
+        # verified trustworthy, not because degradation doesn't matter in
+        # general. static_score and degraded_groups stay unset/empty in
+        # this branch; there is nothing to report because nothing was
+        # extracted.
+        #
+        # CRITICAL CONSTRAINT: this bypasses ONLY static's own judgment.
+        # Memory and network (steps 7/7b, above) already ran independently
+        # of this branch entirely -- they do not even depend on
+        # static_verdict -- and behavioral's gate below
+        # (static_verdict in (ALLOW, ALERT, BLOCK)) already includes ALLOW,
+        # so an allowlist-driven ALLOW still lets a supplied API trace be
+        # scored exactly as an ML-derived ALLOW would. A legitimate signed
+        # binary can still be abused at runtime (DLL injection, process
+        # hollowing, living-off-the-land abuse), which is exactly what
+        # those other signals -- not static -- exist to catch.
+        allowlist_reason = self._check_allowlist(bytez, result.sha256)
+        if allowlist_reason is not None:
+            result.static_verdict = StaticVerdict.ALLOW
+            result.reason_codes.append(allowlist_reason)
+        else:
+            # 4-5. static feature extraction + LightGBM
+            try:
+                vec, degraded = self.feature_extractor.feature_vector_with_report(bytez)
+                result.degraded_groups = degraded
+                static_score = float(self.static_model.predict_proba(vec.reshape(1, -1))[0])
+                result.static_score = static_score
+                result.static_verdict = static_verdict_from_score(static_score)
+            except Exception:
+                logger.exception("static scan failed for %s", file_path)
+                result.static_verdict = StaticVerdict.ERROR
+                result.reason_codes.append("static_scan_exception")
 
         # 5b. feature-group degradation telemetry (review item 6). ANY degraded
         # group -- critical or not -- is recorded on signal_health for ops
@@ -268,6 +314,31 @@ class CortexPipeline:
             result.signal_health[name] = "model_error"
         elif verdict.name == "NOT_PROVIDED" and model is None:
             result.signal_health[name] = "model_not_configured"
+
+    # ------------------------------------------------------------------
+    def _check_allowlist(self, bytez: bytes, sha256_hex: Optional[str]) -> Optional[str]:
+        """Known-file allowlist (scan()'s step 3b). Two independent checks,
+        either sufficient -- returns the reason code for whichever matched
+        first, or None if neither did:
+
+          1. NSRL hash match, if an allowlist artifact is configured
+             (self.nsrl_allowlist is not None). Cheap (O(log N) binary
+             search); checked first.
+          2. Authenticode chain verification to a genuinely trusted root
+             (features/authenticode_trust.py::verify_trusted_chain) --
+             needs no external artifact, always attempted regardless of
+             whether NSRL is configured.
+
+        Returns None (never raises) on no match, missing sha256, or any
+        internal failure of either check -- an allowlist check must never
+        be the reason a scan fails or produces a false ALLOW; static's
+        normal ML judgment is always the safe fallback.
+        """
+        if sha256_hex is not None and self.nsrl_allowlist is not None and self.nsrl_allowlist.contains(sha256_hex):
+            return "static_allowlisted_nsrl"
+        if verify_trusted_chain(bytez).trusted:
+            return "static_allowlisted_authenticode_chain"
+        return None
 
     # ------------------------------------------------------------------
     def _run_memory(self, memory_features: np.ndarray) -> tuple[Optional[float], MemoryVerdict]:

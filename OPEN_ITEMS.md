@@ -306,6 +306,302 @@ behind the BLOCK cap. Closing it needs the parity harness first (item 7),
 then its own static retrain + threshold re-derivation + real-world
 re-validation — separate from the split-discipline retrain above.
 
+## Static false-positive severity cluster — allowlist + corroboration-aware decisioning — design agreed 2026-09-18
+
+**Status (2026-09-18): Addition A DONE (see "Addition A — DONE" below).
+B1 in progress next. B2's mechanism is decided (see "Addition B" below) but
+not yet implemented.** Two additions, agreed in this order, motivated by a
+severity distinction the current system doesn't make: static's known false positives
+(the PyInstaller-packed / atypical-large-PE pattern behind item 2's BLOCK
+cap, see "Cortex-Static: PE-file model" above) sometimes land on files the
+system needs to keep running — e.g. core Windows system binaries — which is
+a materially worse failure mode than a false positive on an arbitrary
+third-party file. Both additions are scoped below; addition B's second half
+is explicitly flagged as needing the maintainer's confirmation before any
+implementation, per instruction.
+
+**Emulation is excluded from both additions**, deliberately, and stays
+excluded until its own separate future item: it is already telemetry-only
+(`decide()` never receives it — see "Cortex-Emulation" above) because of a
+documented temporal concept-drift collapse (recall dropped from ~70% to
+~41% on data only 3 months newer than its training set) and only marginal
+improvement over a trivial baseline. Folding it into either addition below
+would mean trusting exactly the signal already shown not to generalize
+forward in time; it needs its own retrain and re-validation before being
+considered for *any* decision tier, not just this cluster.
+
+### Addition A — known-file allowlist (pre-empts static's ML judgment) — DONE
+
+A rule-based check that runs **before** static's LightGBM model sees a file,
+short-circuiting to `ALLOW` on a match and skipping static's ML judgment
+entirely for that file — while every other signal keeps running exactly as
+it does today, allowlisted or not, because a legitimate signed binary can
+still be abused at runtime (DLL injection, process hollowing, living-off-
+the-land) and memory/behavioral/network are what catch that.
+
+**Confirmed nothing like this exists today.** A repo-wide search for
+allowlist/whitelist/NSRL/trusted-root/known-good-hash-database turns up only
+unrelated hits: a CICIDS *label*-value allowlist in the network dataset
+loader (nothing to do with files or trust), and `pe_features.py`'s
+`self_test()` "known-good signed PE" — a bundled *test fixture* used to
+catch a `pefile`/`signify` API regression at startup, not a runtime trust
+mechanism. Addition A is genuinely new.
+
+**Where it sits (confirmed against the current code):**
+`pipeline.scan()` today runs, in order: (2) path validation, (3)
+`is_valid_pe()`, (4) `feature_vector_with_report()` + `static_model
+.predict_proba()`. The SHA-256 needed for a hash-based lookup is already
+computed at step 2's `hashlib.sha256(bytez)` for every scan — free reuse.
+Addition A becomes a new step **3b**, between PE validation and feature
+extraction: on a match, set `static_verdict = StaticVerdict.ALLOW` directly,
+record which check matched (a reason code, e.g.
+`static_allowlisted_nsrl` / `static_allowlisted_authenticode_chain`, plus
+possibly a dedicated `ScanResult` field for the matched source — exact shape
+TBD at implementation time), and **skip step 4 entirely** — no feature
+extraction, no model call, for static only.
+
+The CRITICAL CONSTRAINT the maintainer stated is already satisfied by the
+existing control flow, not something addition A has to newly enforce:
+memory (`_run_memory`) and network (`_run_network`) both run in `scan()`
+before the static branch even begins and are wholly independent of
+`static_verdict`; behavioral's gate is `static_verdict in (ALLOW, ALERT,
+BLOCK)`, which already includes `ALLOW` — so an allowlist-driven `ALLOW`
+still lets behavioral score a supplied API trace exactly as it would for an
+ML-derived `ALLOW`. Addition A only needs to make sure step 3b sets
+`static_verdict` to a value already inside that existing gate; it doesn't
+touch memory/network/behavioral's code paths at all.
+
+**Two independent match conditions, confirmed feasible, not yet built:**
+
+1. **NIST NSRL hash match.** NSRL's Reference Data Set publishes hash
+   lists per category (the "Modern" category — current, actively-used
+   software — is the one that matches "core Windows system binaries," and
+   is the only category NIST is currently planning a trimmed "minimal"
+   database for). The minimal set is a bulk download (tens of millions of
+   rows, roughly 1–2 GB compressed depending on category/format) containing
+   SHA-1/MD5/SHA-256/filename/product metadata; the newer RDSv3 format ships
+   as a SQLite DB, the legacy minimal format as a flat `NSRLFile.txt`.
+   Two integration shapes exist: (i) a downloaded/prebuilt local artifact —
+   e.g. a new `data/download_nsrl.py` mirroring the existing
+   `data/download_ember2024.py` pattern, indexing the SHA-256 column into a
+   compact local store `pipeline.py` loads at construction time; or (ii) a
+   live `nsrlsvr`-style lookup daemon queried per scan. **Recommend (i)**:
+   ARCHITECTURE.md is explicit that "there is no live traffic capture, ...
+   model-serving API, queue, database, or web service in this repository,"
+   and a runtime daemon dependency for every scan breaks that property for
+   no clear benefit over a prebuilt local index. The full corpus is too
+   large to vendor in git and needs the same "download script produces a
+   gitignored artifact, checked at runtime" treatment already used for
+   EMBER2024.
+2. **Authenticode chain verification to a real trusted root.** Confirmed
+   against the `signify` 0.9.2 already pinned and installed in this venv:
+   `AuthenticodeFile.verify()` / `AuthenticodeSignature.verify()` perform
+   **real chain verification** — not presence-detection — returning valid
+   certificate chains or raising `AuthenticodeVerificationError`, checking
+   digest match, key usage, and chain validity against a
+   `trusted_certificate_store` argument. This venv already carries `signify`'s
+   transitive `mscerts` dependency, which builds
+   `signify.authenticode.TRUSTED_CERTIFICATE_STORE` from a bundled
+   `authroot.stl` — Microsoft's actual Authenticode root Certificate Trust
+   List. Confirmed non-empty and genuine: 566 real roots (Microsoft Root CA
+   variants, VeriSign, etc. — the same trust list Windows itself uses for
+   Authenticode), not a stand-in. **No new dependency is needed.** What's
+   missing is a *call* to `.verify()` — today, `pe_features.py`'s
+   `AuthenticodeSignature.raw_features()` (the ML feature, unaffected by
+   this work) only calls `iter_signatures()` and enumerates certs for
+   summary stats (`num_certs`, `self_signed` via issuer==subject heuristic,
+   etc.); it never calls `.verify()` and so never asserts real chain
+   validity. Addition A needs a **standalone function**, structurally
+   separate from that ML feature group — proposed home: a new module (e.g.
+   `features/authenticode_trust.py`) exposing something like
+   `verify_trusted_chain(bytez) -> bool` (or a small result object), called
+   only from `pipeline.py`'s new step 3b, never from
+   `PEFeatureExtractor`/`AuthenticodeSignature`.
+
+Match condition for step 3b := SHA-256 found in the local NSRL store **OR**
+`verify_trusted_chain()` succeeds. Exact match logic (OR vs. requiring both,
+whether a chain-verified-but-NSRL-absent file gets the same treatment as an
+NSRL-present one) is an implementation-time decision, not resolved here.
+
+#### Addition A — implementation summary (2026-09-18)
+
+Built and merged exactly as scoped above, both match conditions:
+
+- **`features/authenticode_trust.py`** (new) — `verify_trusted_chain(bytez)`
+  returns an `AuthenticodeTrustResult(trusted, reason)`, `reason` one of
+  `verified` / `not_signed` / `parse_error` / `chain_untrusted`. Calls
+  `AuthenticodeFile.verify(trusted_certificate_store=TRUSTED_CERTIFICATE_STORE)`
+  — genuinely never touches `pe_features.py`/`AuthenticodeSignature`.
+  Verified against this repo's own fixtures during development, not just
+  assumed: the repo's one signed fixture (`sample_signed64.exe`) is
+  self-signed and correctly returns `trusted=False, reason=chain_untrusted`
+  — the load-bearing regression case, since a false "verified" there would
+  mean the allowlist trusts every signed binary this repo's own fixture
+  generator produces. Never raises.
+- **`data/download_nsrl.py`** (new) — offline/manual script (not run in CI
+  or at scan time, same posture as `download_ember2024.py`): fetches NIST's
+  version-independent "current" Modern-minimal RDSv3 alias, queries the
+  `FILE` view's `sha256` column, and writes a sorted flat binary artifact of
+  raw 32-byte digests. `--sqlite-path` lets the extraction/build logic be
+  exercised in tests against a small synthetic SQLite fixture, without any
+  network access.
+- **`features/nsrl_allowlist.py`** (new) — `NSRLAllowlist.load(path)`
+  memory-maps that artifact and answers `.contains(sha256_hex)` via
+  `np.searchsorted`, O(log N). Returns `None` (not an error) when the
+  artifact isn't present — mirrors how an unconfigured memory/network model
+  is already neutral rather than a failure.
+- **`inference/pipeline.py`** — new step 3b (`_check_allowlist`, called
+  between PE validation and static feature extraction) and a new
+  `nsrl_allowlist=None` constructor kwarg, wired the same way
+  `memory_model`/`network_model` already are. A match sets
+  `static_verdict = ALLOW` directly, skips static's feature extraction and
+  LightGBM call entirely, and records a reason code
+  (`static_allowlisted_nsrl` / `static_allowlisted_authenticode_chain`) —
+  no new `ScanResult` field, reusing `reason_codes` the same way
+  `static_block_capped_at_alert` / `static_features_degraded` already do.
+  The module docstring's step list and the step-3b code comment both say
+  plainly that this skips BOTH static's ML score AND its feature-
+  degradation check, deliberately — static's own judgment is being set
+  aside for an independently-verified file, not because degradation stops
+  mattering in general.
+
+**A real bug caught and fixed during development, worth recording
+explicitly:** the first on-disk format considered for the NSRL digest
+array used numpy's fixed-width byte-string dtype (`'S32'`). Direct testing
+(not assumption) showed `'S32'` silently strips trailing `0x00` bytes on
+comparison and storage — confirmed with `np.frombuffer(...).item()`/
+equality checks before any test was written against it. Against tens of
+millions of real SHA-256 digests, a hash ending in `0x00` is a ~1-in-256
+event, not a corner case: under `'S32'` this would have produced both false
+negatives (a genuinely allowlisted hash silently never matching itself) and
+false positives (two unrelated digests sharing their first 31 bytes and
+both ending in `0x00` comparing equal). Switched to numpy's void (`'V32'`)
+dtype, verified byte-for-byte exact under sort/searchsorted/equality, and
+added `test_digest_ending_in_null_byte_round_trips_correctly` as a
+permanent regression test. Same category of finding as the double-failure
+mode caught during the earlier feature-degradation work (review item 6) —
+a plausible-looking implementation that is silently wrong on a real,
+non-rare slice of the input space — surfaced here before it ever shipped
+rather than after.
+
+**Critical-constraint proof, not just an assertion:** `tests/test_pipeline.py`
+carries three dedicated tests —
+`test_allowlist_hit_does_not_suppress_memory_malicious`,
+`..._network_malicious`, `..._behavioral_terminate` — each configuring the
+static model as one that raises `AssertionError` if ever invoked, so a
+regression that let the allowlist branch fall through to real ML scoring
+would fail loudly via that assertion, not silently pass. All three confirm
+memory/network/behavioral reach their own independent verdict (`ALERT`,
+`ALERT`, `TERMINATE` respectively) — and `decide()`'s own outcome — on the
+same allowlisted scan, unaffected by static's bypass.
+
+Full suite green throughout (142 passed at completion: 117 baseline + 25
+new — `test_authenticode_trust.py` (6), `test_nsrl_allowlist.py` (7),
+`test_download_nsrl.py` (6), and `test_pipeline.py`'s new allowlist section
+(6) — verified by exact count against the baseline commit, not estimated).
+
+### Addition B — corroboration-aware decision logic (after A)
+
+**B1 — corroboration as a reason-code signal, not a blended score.**
+`decide()`'s existing priority rungs already let memory `MALICIOUS` and
+network `MALICIOUS` fire independently, each producing an identical `ALERT`
+outcome with no distinction from the other, or from just one of them being
+true. Proposal: after the existing priority chain picks its rung, detect
+whether **two or more independently-capped signals** (memory, network, and
+static ALERT/BLOCK) agree at the same time and, if so, append an additional
+reason code (e.g. `corroborated_multi_signal`, or specific pairwise codes)
+to the existing `reasons` list — **without changing `FinalDecision`** (still
+`ALERT`; the priority/rung model is untouched). This is structurally
+identical to how `decide()` already accumulates ERROR reason codes up front
+today regardless of which rung fires (see the `reasons: list[str] = []`
+block near the top of `decide()`) — corroboration detection is the same
+pattern, computed up front and appended after the driving rung's own code.
+A downstream consumer (e.g. a review-queue prioritizer) can then treat a
+corroborated `ALERT` as higher-priority than a single-signal one, entirely
+from `reason_codes` — no numeric confidence/blended score is introduced,
+per instruction, since that would reintroduce exactly the failure mode this
+architecture's severity-hierarchy design already avoids.
+
+**B2 — static's BLOCK authority, permanently non-unilateral — DECIDED
+2026-09-18.** Today's item-2 BLOCK cap is *interim*: `decide()`'s docstring
+lists three removal criteria (feature-parity test passing, residual skew
+closed, real-world re-validation with no confirmed-benign file at/above
+`STATIC_BLOCK_MIN`) that, once ALL met, were designed to let static regain
+autonomous `BLOCK`. This changes that destination: static moves toward
+**never** regaining unilateral `BLOCK` authority again, even after its
+eventual retrain.
+
+**Mechanism (maintainer's mechanism (ii), confirmed):** static `BLOCK`
+continues to demote to `ALERT` by default, exactly as it does today — that
+default does not change. It escalates to `FinalDecision.BLOCK` **only** when
+corroborated. **`corroborated` is defined precisely as:** `memory_verdict ==
+MemoryVerdict.MALICIOUS OR network_verdict == NetworkVerdict.MALICIOUS`,
+evaluated independently of static, on the same scan. Behavioral `MALICIOUS`
+needs no special-casing in this mechanism at all — it already sits at rung 1
+and produces `TERMINATE` unconditionally, which outranks `BLOCK` in the
+`FinalDecision` ordering regardless of what static or this new rung does.
+
+**Critical constraint (to be written verbatim into `decide()`'s docstring at
+implementation time):** corroboration unlocks *only* static's own `BLOCK`
+verdict. It must never let memory's or network's own authority escalate past
+their existing `ALERT` cap. Concretely: a scan where memory is `MALICIOUS`
+and static is merely `ALLOW`/`ALERT` (not `BLOCK`) still resolves to `ALERT`
+via memory's own rung, exactly as today — memory does not borrow static's
+`BLOCK` tier just because they happen to co-occur, and there is no path in
+this mechanism by which memory's or network's own driving rung can produce
+anything other than `ALERT`. The escalation to `BLOCK` happens on *static's*
+rung, using memory/network's verdicts only as corroborating evidence for
+*static's* verdict — not the reverse.
+
+**Implementation-time correctness note (recorded now so it isn't
+rediscovered as a bug later):** `decide()`'s current priority chain is
+strict first-match: rung 2 (memory `MALICIOUS` → `ALERT`) and rung 3
+(network `MALICIOUS` → `ALERT`) both fire, and `return`, *before* rung 4
+(static `ALERT`/`BLOCK`) is ever reached. As written today, a scan with
+static `BLOCK` AND memory `MALICIOUS` never actually reaches the static
+rung — `decide()` returns at rung 2 first. So corroboration cannot be
+"checked at rung 4" as a local addition to the existing static branch; the
+corroboration condition (`static_verdict == BLOCK and (memory ==
+MALICIOUS or network == MALICIOUS)`) must be computed up front — the same
+"compute before the priority chain, independent of which rung fires" pattern
+already used for the ERROR reason codes at the top of `decide()` today — and
+consulted *before* (or folded into) the memory/network rungs, so a
+corroborated static `BLOCK` produces `FinalDecision.BLOCK` rather than being
+pre-empted by memory's or network's own `ALERT` returning first. This is an
+implementation detail of *how* to realize the mechanism above, not a change
+to the mechanism itself.
+
+**Stack, don't replace (confirmed):** corroboration is *additive* to item
+2's existing removal criteria (thrember parity + skew closure + real-world
+validation) — it is not a substitute path to trusting static's `BLOCK`
+verdict in general. Reason: corroboration only helps when another signal is
+actually available and positive at scan time. A static-only scan — no API
+trace supplied (behavioral `NOT_PROVIDED`/`PENDING`), no memory or network
+features supplied (both `NOT_PROVIDED`) — gets **zero** benefit from this
+mechanism: `corroborated` is false by construction whenever memory and
+network are both absent, so static `BLOCK` demotes to `ALERT` exactly as it
+does today, with no escalation path at all. Item 2's three removal criteria
+remain the *only* route to trusting static's `BLOCK` when it is acting
+alone, which is also the most common case in practice (most files are
+scanned with static evidence only). Corroboration and the removal criteria
+solve different problems — the former lets *additional, independently
+positive* evidence unlock `BLOCK` sooner on files where multiple signals
+happen to be available and agree; the latter is what would eventually let
+`BLOCK` stand on static's evidence alone.
+
+### Next steps
+
+- Addition A: `data/download_nsrl.py` (or equivalent), the standalone
+  `verify_trusted_chain()` function, `pipeline.py` step 3b, and tests
+  (allowlist hit/miss, chain-verify success/failure/parse-error, and a check
+  that memory/network/behavioral are provably unaffected by an allowlist
+  `ALLOW`). **Proceeding to implementation scoping now.**
+- Addition B1: additive, low-risk, no structural-policy question attached.
+  **Proceeding to implementation scoping now**, alongside A.
+- Addition B2: mechanism decided (above) but implementation not yet
+  requested — the priority-chain restructuring note above should be
+  reread at that time; not scoped further this pass.
+
 ## Cleanup
 
 - **Unreachable `None` guards** — `MEMORY/NETWORK/EMULATION_MALICIOUS_MIN`

@@ -21,11 +21,13 @@ End-to-end pipeline coverage for:
 """
 from __future__ import annotations
 
+import hashlib
 import os
 
 import numpy as np
 import pytest
 
+from features.authenticode_trust import AuthenticodeTrustResult
 from inference.pipeline import MAX_FILE_SIZE_BYTES, CortexPipeline
 from inference.policy_engine import (
     FinalDecision, MemoryVerdict, NetworkVerdict, StaticVerdict,
@@ -62,6 +64,15 @@ class _ExplodingModel:
 
     def predict_proba(self, *_args, **_kwargs):
         raise RuntimeError("simulated model failure")
+
+
+class _MaliciousModel:
+    """A configured memory/network model that confidently scores MALICIOUS
+    -- 0.999999 clears both MEMORY_MALICIOUS_MIN and NETWORK_MALICIOUS_MIN
+    (config/thresholds.yaml) with no need to import either threshold here."""
+
+    def predict_proba(self, X, *_args, **_kwargs):
+        return np.full(len(X), 0.999999, dtype=np.float64)
 
 
 def _pipe(**kwargs) -> CortexPipeline:
@@ -328,3 +339,127 @@ def test_pipeline_self_test_tolerates_noncritical_and_missing_reference(monkeypa
             lambda self, pe_path=None, _b=benign: list(_b),
         )
         CortexPipeline(static_model=_BenignStaticModel())  # must not raise
+
+
+# --------------------------------------------------------------------------
+# known-file allowlist (OPEN_ITEMS.md "Static false-positive severity
+# cluster", addition A) -- step 3b in scan(), before static's ML judgment.
+# --------------------------------------------------------------------------
+
+with open(_VALID_PE, "rb") as _fh:
+    _VALID_PE_SHA256 = hashlib.sha256(_fh.read()).hexdigest()
+
+
+class _StubAllowlist:
+    """Stands in for features.nsrl_allowlist.NSRLAllowlist -- exercises
+    _check_allowlist()'s wiring without needing a real built artifact
+    (that class has its own dedicated test suite,
+    tests/test_nsrl_allowlist.py)."""
+
+    def __init__(self, matching_sha256: str):
+        self._match = matching_sha256
+
+    def contains(self, sha256_hex: str) -> bool:
+        return sha256_hex == self._match
+
+
+def test_allowlist_nsrl_hit_sets_allow_and_skips_ml_scoring():
+    # static_model is an _ExplodingStaticModel: if step 4's feature
+    # extraction + predict_proba() ran anyway, this test would fail loudly
+    # via that model's own assertion, not silently pass.
+    pipe = _pipe(static_model=_ExplodingStaticModel(),
+                 nsrl_allowlist=_StubAllowlist(matching_sha256=_VALID_PE_SHA256))
+    result = pipe.scan(_VALID_PE)
+
+    assert result.static_verdict == StaticVerdict.ALLOW
+    assert "static_allowlisted_nsrl" in result.reason_codes
+    assert result.static_score is None            # nothing was scored
+    assert result.degraded_groups == []            # nothing was extracted
+    assert result.final_decision == FinalDecision.ALLOW
+
+
+def test_allowlist_authenticode_chain_hit_sets_allow_and_skips_ml_scoring(monkeypatch):
+    # No nsrl_allowlist configured; the chain-verification leg needs no
+    # external artifact and is always attempted. This repo has no real
+    # trusted-signed fixture (its one signed fixture is deliberately
+    # self-signed -- see test_authenticode_trust.py), so the "verified"
+    # outcome is stubbed at the pipeline's import site rather than produced
+    # by a real chain -- features/authenticode_trust.py's own test suite
+    # covers verify_trusted_chain()'s real behavior.
+    monkeypatch.setattr(
+        "inference.pipeline.verify_trusted_chain",
+        lambda bytez: AuthenticodeTrustResult(True, "verified"),
+    )
+    pipe = _pipe(static_model=_ExplodingStaticModel())
+    result = pipe.scan(_VALID_PE)
+
+    assert result.static_verdict == StaticVerdict.ALLOW
+    assert "static_allowlisted_authenticode_chain" in result.reason_codes
+    assert result.static_score is None
+    assert result.final_decision == FinalDecision.ALLOW
+
+
+def test_allowlist_miss_falls_through_to_normal_ml_scoring():
+    # Neither leg matches on the real, unsigned, non-allowlisted fixture:
+    # static's normal ML path must run completely unchanged.
+    pipe = _pipe(static_model=_BenignStaticModel())
+    result = pipe.scan(_VALID_PE)
+
+    assert result.static_verdict == StaticVerdict.ALLOW  # score-derived here, not allowlist-derived
+    assert result.static_score is not None
+    assert not any(code.startswith("static_allowlisted") for code in result.reason_codes)
+
+
+def test_allowlist_hit_does_not_suppress_memory_malicious():
+    """The single most important safety property of this feature: an
+    allowlist match bypasses ONLY static's own judgment. Memory runs
+    independently of static_verdict entirely (see scan()'s step 7) and
+    must still reach its own MALICIOUS verdict -- and decide()'s outcome --
+    on an allowlisted file."""
+    pipe = _pipe(static_model=_ExplodingStaticModel(),
+                 nsrl_allowlist=_StubAllowlist(matching_sha256=_VALID_PE_SHA256),
+                 memory_model=_MaliciousModel())
+    result = pipe.scan(_VALID_PE, memory_features=_MEMORY_FEATURES)
+
+    assert result.static_verdict == StaticVerdict.ALLOW
+    assert "static_allowlisted_nsrl" in result.reason_codes
+    assert result.memory_verdict == MemoryVerdict.MALICIOUS
+    assert result.final_decision == FinalDecision.ALERT  # memory's own capped ceiling, unaffected by the allowlist
+
+
+def test_allowlist_hit_does_not_suppress_network_malicious():
+    pipe = _pipe(static_model=_ExplodingStaticModel(),
+                 nsrl_allowlist=_StubAllowlist(matching_sha256=_VALID_PE_SHA256),
+                 network_model=_MaliciousModel())
+    result = pipe.scan(_VALID_PE, network_features=_NETWORK_FEATURES)
+
+    assert result.static_verdict == StaticVerdict.ALLOW
+    assert "static_allowlisted_nsrl" in result.reason_codes
+    assert result.network_verdict == NetworkVerdict.MALICIOUS
+    assert result.final_decision == FinalDecision.ALERT  # network's own capped ceiling, unaffected by the allowlist
+
+
+def test_allowlist_hit_does_not_suppress_behavioral_terminate(tmp_path):
+    import torch
+
+    class _MaliciousBehavioral:
+        def __call__(self, x):
+            return torch.tensor([6.0])  # sigmoid -> ~0.9975 -> MALICIOUS
+
+    class _PassThroughTokenizer:
+        def encode(self, calls):
+            return np.zeros(100, dtype=np.int64), "ok"
+
+    trace = tmp_path / "trace.json"
+    trace.write_text('["NtCreateFile", "NtWriteFile"]')
+
+    pipe = _pipe(static_model=_ExplodingStaticModel(),
+                 nsrl_allowlist=_StubAllowlist(matching_sha256=_VALID_PE_SHA256),
+                 behavioral_model=_MaliciousBehavioral(),
+                 tokenizer=_PassThroughTokenizer())
+    result = pipe.scan(_VALID_PE, api_calls_json_path=str(trace))
+
+    assert result.static_verdict == StaticVerdict.ALLOW
+    assert "static_allowlisted_nsrl" in result.reason_codes
+    assert result.behavioral_verdict.value == "MALICIOUS"
+    assert result.final_decision == FinalDecision.TERMINATE  # behavioral's uncapped authority, unaffected by the allowlist
