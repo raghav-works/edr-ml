@@ -463,7 +463,62 @@ def decide(
     - Cortex-Static is re-validated on a real-world confirmed-label file set
       (benign + malicious) with no confirmed-benign file at or above
       STATIC_BLOCK_MIN.
-    Until then, do not restore the autonomous BLOCK branch.
+    Until then, do not restore the AUTONOMOUS BLOCK branch -- i.e. static
+    reaching BLOCK unilaterally, on its own evidence alone. Addition B2
+    immediately below is NOT that: it is a narrower, permanent exception
+    that requires a SECOND, independent signal before BLOCK is ever
+    reached, which is the opposite of unilateral. Even once all three
+    criteria above are eventually met, static is never meant to regain
+    unilateral BLOCK authority again -- B2 stays in force permanently,
+    stacked on top of these removal criteria rather than superseded by
+    them (see B2's own section for why: these criteria are about static's
+    evidence *quality* acting alone; B2 is a structural policy decision
+    that static should never again act alone for a BLOCK outcome,
+    independent of how good its evidence gets).
+
+    Addition B2 -- corroboration-gated BLOCK escalation (added 2026-09-18,
+    OPEN_ITEMS.md "Static false-positive severity cluster")
+    ------------------------------------------------------------------
+    Static BLOCK still demotes to ALERT here BY DEFAULT -- that default is
+    unchanged by this addition. It escalates to FinalDecision.BLOCK only
+    when CORROBORATED: memory MALICIOUS OR network MALICIOUS, independently
+    also true on the same scan (see the `corroborating_signals` computation
+    above the priority chain, and addition B1's docstring section for the
+    general 3-way corroboration concept this reuses). Behavioral needs no
+    special-casing here -- it already sits at rung 1 with uncapped
+    TERMINATE authority that outranks BLOCK regardless of any of this.
+
+    CRITICAL CONSTRAINT: corroboration unlocks ONLY static's own BLOCK
+    verdict. It must NEVER let memory's or network's own authority escalate
+    past their existing ALERT cap. This holds by construction, not just by
+    convention: the corroboration-escalation rung below is gated on
+    `static_verdict == StaticVerdict.BLOCK` -- if static is anything else
+    (ALLOW, ALERT, ERROR), that rung's condition is false regardless of
+    memory/network, and a MALICIOUS memory or network verdict falls through
+    unchanged to its own rung further below, which still returns ALERT and
+    nothing else. Memory and network are used here only as corroborating
+    EVIDENCE for static's own already-BLOCK verdict; their own ceiling is
+    untouched in every other case.
+
+    Why this rung must sit ABOVE the memory/network ALERT rungs, not beside
+    them: decide() returns on first match. Memory MALICIOUS and network
+    MALICIOUS each have their own unconditional ALERT rung below this one;
+    without the corroboration-escalation check firing FIRST (immediately
+    after behavioral, before those rungs), a scan with static BLOCK and
+    memory MALICIOUS would already have returned ALERT via memory's rung
+    before static's corroborated BLOCK was ever considered -- silently
+    losing the escalation this addition exists to make possible.
+
+    Stack, not replace: this is ADDITIVE to the removal criteria above, not
+    a substitute path to autonomous BLOCK. It only ever helps when another
+    signal is actually supplied AND positive at scan time -- a static-only
+    scan (no API trace, no memory or network features supplied) can never
+    satisfy `len(corroborating_signals) >= 2` no matter how confident
+    static's own score is, so it gets zero benefit from this addition and
+    demotes to ALERT exactly as it always has. The removal criteria above
+    remain the only path to trusting a static-only BLOCK; this addition
+    solves the different problem of a file where corroborating evidence
+    happens to already be available.
 
     Memory is evaluated as an independent third signal, NOT gated behind a
     static ALLOW the way behavioral is (see pipeline.py: memory runs
@@ -604,6 +659,22 @@ def decide(
 
     if behavioral_verdict == BehavioralVerdict.MALICIOUS:
         return FinalDecision.TERMINATE, ["behavioral_malicious", *corroboration, *reasons]
+
+    # Addition B2 (see docstring) -- MUST be checked here, before the
+    # memory/network ALERT rungs immediately below, or a corroborated
+    # static BLOCK would be silently pre-empted by one of those rungs
+    # returning ALERT first. `len(corroborating_signals) >= 2` here is
+    # exactly "memory MALICIOUS OR network MALICIOUS": "static" is already
+    # guaranteed present in corroborating_signals whenever static_verdict
+    # == BLOCK (see that computation above), so needing one MORE member
+    # collapses to needing at least one of the other two.
+    if static_verdict == StaticVerdict.BLOCK and len(corroborating_signals) >= 2:
+        corroborators = []
+        if memory_verdict == MemoryVerdict.MALICIOUS:
+            corroborators.append("memory_malicious")
+        if network_verdict == NetworkVerdict.MALICIOUS:
+            corroborators.append("network_malicious")
+        return FinalDecision.BLOCK, ["static_block_corroborated", *corroborators, *corroboration, *reasons]
 
     if memory_verdict == MemoryVerdict.MALICIOUS:
         return FinalDecision.ALERT, ["memory_malicious", *corroboration, *reasons]

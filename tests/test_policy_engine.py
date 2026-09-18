@@ -47,12 +47,16 @@ CASES = [
     ((S.ALLOW, B.NOT_PROVIDED, NM, NN), F.ALLOW, "no_malicious_evidence"),
     ((S.ALLOW, B.PENDING, NM, NN), F.ALLOW, "no_malicious_evidence"),
 
-    # item 2: static BLOCK is interim-capped to ALERT and must NOT pre-empt behavioral
+    # item 2: static BLOCK is interim-capped to ALERT (uncorroborated) and
+    # must NOT pre-empt behavioral.
     ((S.BLOCK, B.NOT_PROVIDED, NM, NN), F.ALERT, "static_block_capped_at_alert"),
     ((S.BLOCK, B.BENIGN, NM, NN), F.ALERT, "static_block_capped_at_alert"),
     ((S.BLOCK, B.MALICIOUS, NM, NN), F.TERMINATE, "behavioral_malicious"),
-    ((S.BLOCK, B.NOT_PROVIDED, M.MALICIOUS, NN), F.ALERT, "memory_malicious"),
-    ((S.BLOCK, B.NOT_PROVIDED, NM, N.MALICIOUS), F.ALERT, "network_malicious"),
+    # addition B2: static BLOCK corroborated by memory/network MALICIOUS
+    # escalates to BLOCK instead of the capped ALERT above -- behavioral
+    # MALICIOUS still outranks it regardless (row above).
+    ((S.BLOCK, B.NOT_PROVIDED, M.MALICIOUS, NN), F.BLOCK, "static_block_corroborated"),
+    ((S.BLOCK, B.NOT_PROVIDED, NM, N.MALICIOUS), F.BLOCK, "static_block_corroborated"),
 
     # static ALERT
     ((S.ALERT, B.BENIGN, NM, NN), F.ALERT, "static_alert"),
@@ -98,9 +102,22 @@ _ALL = list(itertools.product(list(S), list(B), list(M), list(N)))
 _B_NOT_MAL = (B.NOT_PROVIDED, B.PENDING, B.BENIGN, B.ERROR)
 
 
-def test_decide_never_returns_block():
-    """Item 2: static BLOCK is capped, so decide() must never return BLOCK."""
-    assert all(decide(*v)[0] != F.BLOCK for v in _ALL)
+def test_decide_returns_block_iff_static_block_is_corroborated():
+    """Superseded item-2 invariant: pre-B2, decide() never returned BLOCK at
+    all (static's autonomous BLOCK was fully capped to ALERT). Addition B2
+    (2026-09-18) narrows that: BLOCK is now reachable, but ONLY when static
+    is independently BLOCK AND corroborated by memory or network MALICIOUS
+    -- and even then, behavioral MALICIOUS's uncapped TERMINATE still wins.
+    Every other combination in the full product must still never reach
+    BLOCK, exactly as before."""
+    for s, b, m, n in _ALL:
+        final = decide(s, b, m, n)[0]
+        expected_block = (
+            b != B.MALICIOUS
+            and s == S.BLOCK
+            and (m == M.MALICIOUS or n == N.MALICIOUS)
+        )
+        assert (final == F.BLOCK) == expected_block
 
 
 def test_terminate_iff_behavioral_malicious():
@@ -109,17 +126,33 @@ def test_terminate_iff_behavioral_malicious():
 
 
 def test_network_alone_never_escalates_past_alert():
-    """Item 6: network MALICIOUS with behavioral != MALICIOUS -> always ALERT
-    (never ALLOW, never BLOCK/TERMINATE)."""
+    """Item 6: network MALICIOUS with behavioral != MALICIOUS and static NOT
+    independently BLOCK -> always ALERT (never ALLOW, never TERMINATE).
+    When static IS independently BLOCK, network's MALICIOUS verdict
+    corroborates STATIC's verdict (addition B2) and the outcome becomes
+    BLOCK -- that is static's escalation, not network's: network's OWN
+    ceiling is still exactly ALERT in every case where static is not
+    BLOCK, which is what "alone" means here."""
     for s, m in itertools.product(list(S), list(M)):
         for b in _B_NOT_MAL:
-            assert decide(s, b, m, N.MALICIOUS)[0] == F.ALERT
+            final = decide(s, b, m, N.MALICIOUS)[0]
+            if s == S.BLOCK:
+                assert final == F.BLOCK  # corroborated static BLOCK (addition B2)
+            else:
+                assert final == F.ALERT
 
 
 def test_memory_alone_never_escalates_past_alert():
+    """Same reasoning as test_network_alone_never_escalates_past_alert:
+    memory's own ceiling is ALERT except when it corroborates an
+    independently-BLOCK static verdict (addition B2)."""
     for s, n in itertools.product(list(S), list(N)):
         for b in _B_NOT_MAL:
-            assert decide(s, b, M.MALICIOUS, n)[0] == F.ALERT
+            final = decide(s, b, M.MALICIOUS, n)[0]
+            if s == S.BLOCK:
+                assert final == F.BLOCK  # corroborated static BLOCK (addition B2)
+            else:
+                assert final == F.ALERT
 
 
 def test_not_provided_is_neutral_for_memory_and_network():
@@ -232,10 +265,15 @@ def test_behavioral_is_not_a_corroboration_input():
 
 
 def test_two_signals_corroborate_without_changing_outcome():
+    # NOTE: static BLOCK + memory/network MALICIOUS is deliberately NOT one
+    # of these cases -- addition B2 (below) makes that combination change
+    # the outcome to BLOCK on purpose. These three all involve static ALLOW
+    # or ALERT, where corroboration is flag-only (B1) with no escalation
+    # path (B2 only ever applies to static BLOCK).
     for s, b, m, n, expected_final in [
         (S.ALLOW, B.NOT_PROVIDED, M.MALICIOUS, N.MALICIOUS, F.ALERT),   # memory+network
-        (S.ALERT, B.NOT_PROVIDED, M.MALICIOUS, NN, F.ALERT),            # static+memory
-        (S.BLOCK, B.NOT_PROVIDED, NM, N.MALICIOUS, F.ALERT),            # static(capped)+network
+        (S.ALERT, B.NOT_PROVIDED, M.MALICIOUS, NN, F.ALERT),            # static(ALERT)+memory
+        (S.ALERT, B.NOT_PROVIDED, NM, N.MALICIOUS, F.ALERT),            # static(ALERT)+network
     ]:
         final, reasons = decide(s, b, m, n)
         assert final == expected_final
@@ -267,6 +305,74 @@ def test_corroboration_does_not_leak_into_needs_review_or_allow():
     final, reasons = decide(S.ALLOW, B.BENIGN, NM, NN)
     assert final == F.ALLOW
     assert "corroborated_multi_signal" not in reasons
+
+
+# ------------------------------------------------- addition B2: corroborated BLOCK
+# "Static false-positive severity cluster" (OPEN_ITEMS.md), mechanism (ii):
+# static BLOCK demotes to ALERT by default; escalates to BLOCK only when
+# corroborated by memory or network MALICIOUS. Additive to, not a
+# replacement for, item 2's removal criteria for static acting alone.
+
+def test_uncorroborated_block_still_demotes_to_alert():
+    """The default is unchanged: static BLOCK alone, or BLOCK alongside a
+    non-MALICIOUS memory/network verdict, still demotes to ALERT."""
+    for m, n in [(NM, NN), (M.BENIGN, N.BENIGN), (M.ERROR, N.ERROR), (M.NOT_PROVIDED, N.ERROR)]:
+        final, reasons = decide(S.BLOCK, B.NOT_PROVIDED, m, n)
+        assert final == F.ALERT
+        assert "static_block_capped_at_alert" in reasons
+        assert "static_block_corroborated" not in reasons
+
+
+def test_memory_corroborates_static_block():
+    final, reasons = decide(S.BLOCK, B.NOT_PROVIDED, M.MALICIOUS, NN)
+    assert final == F.BLOCK
+    assert reasons[0] == "static_block_corroborated"
+    assert "memory_malicious" in reasons
+    assert "corroborated_multi_signal" in reasons
+    assert "static_block_capped_at_alert" not in reasons  # not the demoted path
+
+
+def test_network_corroborates_static_block():
+    final, reasons = decide(S.BLOCK, B.NOT_PROVIDED, NM, N.MALICIOUS)
+    assert final == F.BLOCK
+    assert reasons[0] == "static_block_corroborated"
+    assert "network_malicious" in reasons
+
+
+def test_both_memory_and_network_corroborate_static_block_once():
+    final, reasons = decide(S.BLOCK, B.NOT_PROVIDED, M.MALICIOUS, N.MALICIOUS)
+    assert final == F.BLOCK
+    assert reasons[0] == "static_block_corroborated"
+    assert "memory_malicious" in reasons
+    assert "network_malicious" in reasons
+    assert reasons.count("static_block_corroborated") == 1
+
+
+def test_behavioral_terminate_still_outranks_corroborated_block():
+    """Behavioral's uncapped authority is untouched by B2: even a
+    corroborated static BLOCK loses to a completed behavioral MALICIOUS."""
+    final, reasons = decide(S.BLOCK, B.MALICIOUS, M.MALICIOUS, N.MALICIOUS)
+    assert final == F.TERMINATE
+    assert reasons[0] == "behavioral_malicious"
+
+
+def test_static_alert_never_escalates_to_block_even_when_corroborated():
+    """B2 only applies to static BLOCK, never to static ALERT -- a merely
+    ALERT-scoring file cannot reach BLOCK no matter how much corroboration
+    is available."""
+    final, reasons = decide(S.ALERT, B.NOT_PROVIDED, M.MALICIOUS, N.MALICIOUS)
+    assert final == F.ALERT
+    assert "static_block_corroborated" not in reasons
+
+
+def test_memory_or_network_alone_can_never_reach_block():
+    """CRITICAL CONSTRAINT: corroboration unlocks ONLY static's own BLOCK
+    verdict. Memory/network's own ceiling must stay ALERT in every case
+    where static is not independently BLOCK, across the full product --
+    not just the hand-picked cases above."""
+    for s, b, m, n in _ALL:
+        if s != S.BLOCK and b != B.MALICIOUS:
+            assert decide(s, b, m, n)[0] != F.BLOCK
 
 
 # ------------------------------------------------------ verdict_from_score helpers
