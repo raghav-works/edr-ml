@@ -204,6 +204,71 @@ def test_capped_block_reason_code():
             assert "static_block_capped_at_alert" in reasons
 
 
+# --------------------------------------------------------- addition B1: corroboration
+# "Static false-positive severity cluster" (OPEN_ITEMS.md). Two or more of
+# {static ALERT/BLOCK, memory MALICIOUS, network MALICIOUS} agreeing adds
+# "corroborated_multi_signal" to reasons WITHOUT changing FinalDecision.
+# Behavioral is deliberately excluded as a corroboration input/target -- it
+# already has uncapped TERMINATE authority on its own.
+
+def test_single_signal_is_not_corroborated():
+    for s, b, m, n in [
+        (S.ALLOW, B.NOT_PROVIDED, M.MALICIOUS, NN),
+        (S.ALLOW, B.NOT_PROVIDED, NM, N.MALICIOUS),
+        (S.ALERT, B.NOT_PROVIDED, NM, NN),
+        (S.BLOCK, B.NOT_PROVIDED, NM, NN),
+    ]:
+        final, reasons = decide(s, b, m, n)
+        assert "corroborated_multi_signal" not in reasons
+
+
+def test_behavioral_is_not_a_corroboration_input():
+    """Behavioral MALICIOUS is uncapped (TERMINATE) on its own and must not
+    count toward, or be counted as, corroboration -- only one of
+    {static ALERT/BLOCK, memory, network} is present here, so no flag."""
+    final, reasons = decide(S.ALERT, B.MALICIOUS, NM, NN)
+    assert final == F.TERMINATE
+    assert "corroborated_multi_signal" not in reasons
+
+
+def test_two_signals_corroborate_without_changing_outcome():
+    for s, b, m, n, expected_final in [
+        (S.ALLOW, B.NOT_PROVIDED, M.MALICIOUS, N.MALICIOUS, F.ALERT),   # memory+network
+        (S.ALERT, B.NOT_PROVIDED, M.MALICIOUS, NN, F.ALERT),            # static+memory
+        (S.BLOCK, B.NOT_PROVIDED, NM, N.MALICIOUS, F.ALERT),            # static(capped)+network
+    ]:
+        final, reasons = decide(s, b, m, n)
+        assert final == expected_final
+        assert "corroborated_multi_signal" in reasons
+
+
+def test_three_signals_corroborate_once_not_thrice():
+    final, reasons = decide(S.ALERT, B.NOT_PROVIDED, M.MALICIOUS, N.MALICIOUS)
+    assert final == F.ALERT
+    assert reasons.count("corroborated_multi_signal") == 1
+
+
+def test_corroboration_flag_survives_under_terminate():
+    """Corroboration is still recorded as audit information even when
+    behavioral's own uncapped TERMINATE decides the outcome -- it cannot
+    change a TERMINATE, but "was this also independently corroborated" is
+    useful even then."""
+    final, reasons = decide(S.ALERT, B.MALICIOUS, M.MALICIOUS, NN)
+    assert final == F.TERMINATE
+    assert reasons[0] == "behavioral_malicious"
+    assert "corroborated_multi_signal" in reasons
+
+
+def test_corroboration_does_not_leak_into_needs_review_or_allow():
+    final, reasons = decide(S.ERROR, B.ERROR, M.ERROR, N.ERROR)
+    assert final == F.NEEDS_REVIEW
+    assert "corroborated_multi_signal" not in reasons
+
+    final, reasons = decide(S.ALLOW, B.BENIGN, NM, NN)
+    assert final == F.ALLOW
+    assert "corroborated_multi_signal" not in reasons
+
+
 # ------------------------------------------------------ verdict_from_score helpers
 def test_static_verdict_from_score_bands():
     assert static_verdict_from_score(0.0) == S.ALLOW

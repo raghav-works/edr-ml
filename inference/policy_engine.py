@@ -397,6 +397,10 @@ def decide(
         5. any static / behavioral / memory / network ERROR -> NEEDS_REVIEW
         6. otherwise                 -> ALLOW
 
+    2+ of {static ALERT/BLOCK, memory MALICIOUS, network MALICIOUS} agreeing
+    adds a `corroborated_multi_signal` reason code without changing the
+    outcome above -- see "Corroboration (addition B1)" below.
+
     Reason-code accumulation
     -----------------------
     The ERROR check at rung 5 does NOT drive the outcome on its own when a
@@ -526,6 +530,30 @@ def decide(
     at least as firm as memory's, not a formality to relax once Network's
     numbers look good -- they already do, and that's exactly the case this
     cap exists for.
+
+    Corroboration (addition B1, OPEN_ITEMS.md "Static false-positive
+    severity cluster", added 2026-09-18)
+    -----------------------------------------------------------------
+    Two or more of the independently-capped signals -- memory MALICIOUS,
+    network MALICIOUS, static ALERT/BLOCK -- agreeing on the same scan is
+    stronger evidence than any single one alone, even though it does NOT
+    change the OUTCOME here: whichever rung fires still returns its own
+    capped result (ALERT, or TERMINATE if behavioral fired). This is
+    deliberately a reason-code flag, not a blended/averaged score --
+    blending scores is exactly the failure mode this severity-hierarchy
+    design exists to avoid. `reasons` gains `"corroborated_multi_signal"`
+    whenever 2+ of those three conditions hold, computed up-front (the same
+    "before the priority chain, independent of which rung fires" pattern as
+    the ERROR reasons above) so it is attached regardless of which rung
+    actually decides the outcome -- including a TERMINATE driven by
+    behavioral alone, where corroboration cannot change the result but is
+    still useful audit information ("was this TERMINATE also independently
+    corroborated?"). Behavioral is deliberately NOT a corroboration input
+    and does not need corroborating to reach TERMINATE -- it already has
+    uncapped authority on its own (see the module-level decision policy).
+    A downstream consumer (e.g. a review-queue prioritizer) can treat a
+    corroborated ALERT as higher-priority than a single-signal one purely
+    from this reason code.
     """
     # Record every signal currently in the ERROR state, up-front and
     # independent of which rung drives the outcome. decide() returns on first
@@ -549,8 +577,24 @@ def decide(
     if network_verdict == NetworkVerdict.ERROR:
         reasons.append("network_scan_error")
 
+    # Corroboration (addition B1, see this function's docstring) -- computed
+    # up-front, same reasoning as the ERROR reasons above: whichever rung
+    # below actually decides the outcome, this flag must still be attached.
+    # Behavioral is deliberately excluded as a corroboration input (see
+    # docstring).
+    corroborating_signals = [
+        name for name, hit in (
+            ("static", static_verdict in (StaticVerdict.ALERT, StaticVerdict.BLOCK)),
+            ("memory", memory_verdict == MemoryVerdict.MALICIOUS),
+            ("network", network_verdict == NetworkVerdict.MALICIOUS),
+        )
+        if hit
+    ]
+    corroboration = ["corroborated_multi_signal"] if len(corroborating_signals) >= 2 else []
+
     # Priority chain -- first match decides the OUTCOME. The reason code for
-    # the rung that fired is listed first, then any error codes from above.
+    # the rung that fired is listed first, then any corroboration flag, then
+    # any error codes from above.
     #
     # Cortex-Static's BLOCK verdict is NOT an autonomous top-priority block.
     # It is interim-capped to ALERT (see this function's docstring for the
@@ -559,13 +603,13 @@ def decide(
     # behavioral signal can still escalate the same file to TERMINATE.
 
     if behavioral_verdict == BehavioralVerdict.MALICIOUS:
-        return FinalDecision.TERMINATE, ["behavioral_malicious", *reasons]
+        return FinalDecision.TERMINATE, ["behavioral_malicious", *corroboration, *reasons]
 
     if memory_verdict == MemoryVerdict.MALICIOUS:
-        return FinalDecision.ALERT, ["memory_malicious", *reasons]
+        return FinalDecision.ALERT, ["memory_malicious", *corroboration, *reasons]
 
     if network_verdict == NetworkVerdict.MALICIOUS:
-        return FinalDecision.ALERT, ["network_malicious", *reasons]
+        return FinalDecision.ALERT, ["network_malicious", *corroboration, *reasons]
 
     if static_verdict in (StaticVerdict.ALERT, StaticVerdict.BLOCK):
         # static BLOCK demoted to ALERT (interim cap); the distinct reason
@@ -575,7 +619,7 @@ def decide(
             if static_verdict == StaticVerdict.BLOCK
             else "static_alert"
         )
-        return FinalDecision.ALERT, [driver, *reasons]
+        return FinalDecision.ALERT, [driver, *corroboration, *reasons]
 
     # No malicious or suspicious evidence from any channel that completed.
     if reasons:
