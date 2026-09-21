@@ -56,22 +56,23 @@ def _thr(data: dict, *path: str) -> float:
 
 _THRESHOLDS = _load_thresholds()
 
-# Static thresholds re-derived from data/models/cortex_static (LightGBM,
-# trained on the deduplicated EMBER2024 PE-format train split) via
-# models.static_lgbm.find_threshold_for_fpr() against the calibrated
-# probabilities on the deduplicated EMBER2024 test split (539,940 rows).
-# STATIC_BLOCK_MIN hits the architecture doc's max_fpr@0.1% = 0.001 bar
-# (target_fpr=0.001 -> actual FPR=0.000997, detection_rate=0.9168 at this
-# threshold). STATIC_ALLOW_MAX uses target_fpr=0.01 (actual FPR=0.009999,
-# detection_rate=0.9803).
+# Static thresholds are loaded from config/thresholds.yaml (see
+# STATIC_ALLOW_MAX / STATIC_BLOCK_MIN below). That file's static.* comment
+# is the derivation record: booster and calibrator identity, the split the
+# thresholds were derived on (cal, not test), the target FPRs and their
+# measured values, and the one-time held-out test read. Figures are
+# deliberately not repeated here: they go stale on every re-derivation.
+# Thresholds are read once at import, so a process must be restarted to
+# pick up a change.
 #
-# RE-DERIVED 2026-09-08 after the Platt-calibrator fix (calibrators now fit
-# on raw booster margins, not sigmoid probabilities). The booster is
-# unchanged, so AUC-ROC (0.9988) and the operating points above are
-# unchanged -- only the calibrated score scale moved, so these raw values
-# differ from the pre-fix ones (ALLOW was 0.6163460957, BLOCK 0.9950119117).
-# The old values must NOT be used with the recalibrated model: at the old
-# BLOCK value the recalibrated model blocks at only ~0.03% FPR / 86% det.
+# History: these values have been re-derived twice since they were first
+# derived. First after a Platt-calibrator fix (calibrators fit on raw
+# booster margins instead of sigmoid probabilities; same booster). Then by
+# the split-discipline retrain (new booster; calibrator fit on a dedicated
+# `cal` split instead of val; thresholds derived on `cal` instead of test).
+# A threshold from one derivation must never be used with a model or
+# calibrator from another; config/thresholds.yaml keeps the superseded
+# values and says what replaced them.
 STATIC_ALLOW_MAX = _thr(_THRESHOLDS, "static", "allow_below")        # score <  this -> ALLOW
 STATIC_BLOCK_MIN = _thr(_THRESHOLDS, "static", "block_at_or_above")  # score >= this -> BLOCK  (between the two -> ALERT)
 # INTERIM CAP (2026-09-08): a score >= STATIC_BLOCK_MIN still yields

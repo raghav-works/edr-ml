@@ -29,6 +29,7 @@ module docstring for the 3-way static readout and the behavioral bands.
 ========================================================================
 
 ==============================================================================
+# SUPERSEDED 2026-09-21 for the static model/thresholds -- see reports/static_retrain_20260921/eval_static_retrain_test.txt and OPEN_ITEMS.md's "The one authorized test read" / "Promotion" sections for the current numbers; the figures below reflect the pre-2026-09-21 model.
 1. CORTEX-STATIC  (data/models/cortex_static.lgbm)
    STATIC_ALLOW_MAX = 0.5471026402140103
    STATIC_BLOCK_MIN = 0.9798998555119341

@@ -9,8 +9,10 @@
 # static.* RE-DERIVED 2026-09-08 after the Platt-calibrator fix
 # (models/*_lgbm.py calibrators fit on raw booster margins, not sigmoid
 # probabilities; ONNX export reconstructs the margin in-graph). The static
-# booster is unchanged there, so its AUC and operating points are unchanged
-# -- only the calibrated score scale moved.
+# booster at that time was unchanged, so its AUC and operating points were
+# unchanged then -- only the calibrated score scale moved. SUPERSEDED for
+# static by the 2026-09-21 full retrain below; kept as history for
+# memory.*/network.*, where it still describes the current values.
 #
 # memory.* and network.* RE-DERIVED 2026-09-10 by the split-discipline
 # retrain in OPEN_ITEMS.md's "retrain cluster" section (PDF review items 2
@@ -19,24 +21,73 @@
 # the booster fit AND early stopping, not the val split), and the operating
 # point below is derived on `cal` alone -- `test` is untouched until the
 # final scripts/evaluate_all_models.py run. Their boosters, AUCs and
-# operating points all changed. static.* still awaits the same treatment
-# (its own later session: EMBER2024 parquet regen + retrain).
+# operating points all changed. static.* received the same split-discipline
+# treatment in its own later session, completed 2026-09-21 (EMBER2024
+# parquet regen + full retrain) -- see the static.* section below.
 #
 # See the per-constant comments in inference/policy_engine.py for every
 # superseded value and why a calibrated score scale is never portable
 # between calibrators.
 #
-# static.*: re-derived against data/models/cortex_static (LightGBM trained
-# on the deduplicated EMBER2024 PE-format train split, 2.34M rows) via
-# models.static_lgbm.find_threshold_for_fpr() on the calibrated
-# probabilities from the deduplicated EMBER2024 test split (539,940 rows).
-# block_at_or_above hits the architecture doc's max_fpr@0.1% = 0.001 bar
-# (target_fpr=0.001 -> actual FPR=0.000997, detection_rate=0.9168).
-# allow_below uses target_fpr=0.01 (actual FPR=0.009999, detection_rate=
-# 0.9803) -- the score distribution has a cliff between target_fpr 0.005
-# and 0.01 (threshold drops from ~0.96 to ~0.62), so 0.01 is where ALLOW
-# stops sitting in near-BLOCK territory and starts meaningfully separating
-# from ALERT.
+# static.*: RE-DERIVED 2026-09-21 by the split-discipline full retrain
+# (OPEN_ITEMS.md "The one authorized test read (2026-09-21, MEASURED)"),
+# addressing the calibrator-fit-on-val and thresholds-derived-on-test
+# parts of items 2 and 3 (item 2's interim BLOCK cap is NOT lifted; see
+# below) and the ExportsInfo feature-fix regen (item 8 residue) for
+# static. Full model +
+# derivation + promotion record: reports/static_retrain_20260921/ (this
+# repo) and OPEN_ITEMS.md's "Chosen candidate thresholds" and "The one
+# authorized test read" sections.
+#
+# Booster retrained on the regenerated (ExportsInfo-fixed) EMBER2024 train
+# split via a dedicated `cal` split (train/val/cal carve; test frozen by
+# row identity, features changed by design): Platt calibrator fit on `cal`
+# (held out of the booster fit AND early stopping, not val), and both
+# operating points below derived via models.static_lgbm.
+# find_threshold_for_fpr() on calibrated `cal` probabilities alone.
+# block_at_or_above: target_fpr=0.0005 -> cal FPR 0.000496 (58/116,862
+# benign FP), cal detection 0.9311; val-only check FPR 0.000615
+# (72/117,001), detection 0.9326. allow_below: target_fpr=0.01 -> cal FPR
+# 0.009995 (1168/116,862 benign FP), cal detection 0.9887; val-only check
+# FPR 0.010231 (1197/117,001), detection 0.9890.
+#
+# Model/threshold pairing -- these thresholds are only valid for the model
+# with .lgbm sha256
+# acfa5a757aa13cd0708c00ca97f445ed86ab54d9a4e80505c7fd733157b02bea
+# (LGBMModel.model_hash acfa5a757aa13cd0), .onnx sha256
+# 636c77c5c536bf3ba2996205206c718d481708b39e7bb0007e4b3535874b4944.
+# data/models/cortex_static.{lgbm,meta,onnx} are build outputs (gitignored,
+# not committed) -- regenerate/verify against these hashes, do not assume
+# the deployed files match this comment without checking.
+#
+# ONE-TIME held-out test read (2026-09-21, MEASURED, after these
+# thresholds were pre-registered on cal alone -- see reports/
+# static_retrain_20260921/PREREGISTRATION.txt): test AUC 0.998778 (>=
+# 0.9985 amended gate: PASS). allow_below test FPR 0.012129 (FP
+# 3274/269,940, 95% CI [0.011719,0.012549]), detection 0.9821.
+# block_at_or_above test FPR 0.001011 (FP 273/269,940, 95% CI
+# [0.000895,0.001139]), detection 0.9149 -- this CI contains the
+# architecture doc's 0.001 bar, so block_at_or_above is AT the 0.1% bar on
+# held-out data, not demonstrably below it.
+#
+# The prior (pre-2026-09-21) static.* thresholds below were derived
+# directly on the test split itself (find_threshold_for_fpr() run against
+# calibrated EMBER2024 test-split probabilities) rather than on a held-out
+# cal split -- which is why their recorded test FPRs (0.009999, 0.000997)
+# equal their targets (0.01, 0.001) almost exactly: that agreement was true
+# by construction, not an out-of-sample result. The current thresholds are
+# derived honestly on cal and read against test exactly once, so some
+# in-sample-vs-out-of-sample drift (e.g. the higher measured allow_below
+# test FPR above) is expected and is the main reason the two derivations
+# aren't directly comparable -- the EMBER2024 ExportsInfo feature
+# regeneration between them being a secondary, smaller factor is INFERRED,
+# not measured (no ablation isolating it from the derivation-methodology
+# difference above has been run).
+#
+# Static BLOCK verdicts remain capped to ALERT by the interim
+# corroboration-gated policy (inference/policy_engine.py::decide(), item 2
+# in OPEN_ITEMS.md) -- unchanged by this retrain; only corroborated
+# multi-signal cases still reach BLOCK.
 #
 # behavioral.*: re-derived against data/models/cortex_behavioral_best.pt
 # (1D-CNN+attention, trained on the deduplicated Mal-API-2019+MalbehavD-V1+
@@ -119,8 +170,8 @@
 # noise in the README's Cortex-Network section.
 
 static:
-  allow_below: 0.5471026402140103      # score <  this -> ALLOW   (pre-calibration-fix: 0.6163460957)
-  block_at_or_above: 0.9798998555119341  # score >= this -> BLOCK (else ALERT)  (pre-fix: 0.9950119117)
+  allow_below: 0.4789517595186417      # score <  this -> ALLOW   (superseded: 0.5471026402140103, pre-calibration-fix: 0.6163460957)
+  block_at_or_above: 0.9811748406902472  # score >= this -> BLOCK (else ALERT)  (superseded: 0.9798998555119341, pre-fix: 0.9950119117)
 
 behavioral:
   malicious_at_or_above: 0.60  # score >= this -> MALICIOUS, else BENIGN

@@ -132,9 +132,9 @@ A feature group that fails extraction is **reported, not silently zero-filled** 
 
 | Score band | Static verdict |
 |---|---|
-| `< 0.5471026402140103` | `ALLOW` |
-| below `0.9798998555119341` | `ALERT` |
-| `>= 0.9798998555119341` | `BLOCK` |
+| `< 0.4789517595186417` | `ALLOW` |
+| below `0.9811748406902472` | `ALERT` |
+| `>= 0.9811748406902472` | `BLOCK` |
 
 These values load at import time from `config/thresholds.yaml`, the single source of truth. Missing or malformed configuration fails loudly.
 
@@ -208,7 +208,7 @@ flowchart LR
 
 | Signal | Data / canonicalization | Split protection | Trainer/output |
 |---|---|---|---|
-| Static | EMBER2024 PE records; dedupe SHA-256 or feature hash | random validation carve-out from train; separate test; drop unlabeled `-1` | `train_static.py` → static `.lgbm` + `.meta` |
+| Static | EMBER2024 PE records; dedupe SHA-256 or feature hash | train/val/cal carve (seeded permutation); `test` frozen and read only by evaluate_all_models; calibrator fit on `cal`, not val; drop unlabeled `-1` | `train_static.py` → static `.lgbm` + `.meta` |
 | Behavioral | Mal-API-2019, MalbehavD-V1, Carpenter benign data; dedupe real IDs | group identity/family/source before stratified allocation | `train_behavioral.py` → checkpoint + `api_vocab.json` |
 | Memory | CIC-MalMem-2022 CSV, validated 55-column schema | group related sample IDs and exact feature duplicates; verify no leakage | `train_memory.py` → memory `.lgbm` + `.meta` |
 | Network | CSE-CIC-IDS2018 CSVs; align schema, clean, memory-safe stratified sampling | exclude ambiguous feature groups; group duplicate vectors; stratify by day/attack | `train_network.py` → network `.lgbm` + `.meta` |
