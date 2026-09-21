@@ -135,14 +135,59 @@ def _model_hash(booster: lgb.Booster) -> str:
     return hashlib.sha256(booster.model_to_string().encode("utf-8")).hexdigest()[:16]
 
 
-def train(
-    X_train: NDArray[np.float32], y_train: NDArray[np.int32],
-    X_val: NDArray[np.float32], y_val: NDArray[np.int32],
+def train_from_holder(
+    holder: dict,
     *, params: Optional[dict[str, Any]] = None,
     n_estimators: int = DEFAULT_N_ESTIMATORS,
     early_stopping_rounds: int = DEFAULT_EARLY_STOPPING,
-    calibrate: bool = True,
 ) -> LGBMModel:
+    """Boosting only -- returns an LGBMModel with calibrator=None. Fit the
+    Platt calibrator afterward with calibrate() on a THIRD split (cal), once
+    X_train/X_val are already freed. Keeping calibration out of this
+    function means cal's raw array is never resident at the same time as
+    Dataset construction + boosting -- the single riskiest memory window
+    for a 2568-feature / multi-million-row Dataset (see the OOM note on
+    lgb.Dataset() below).
+
+    Takes a plain dict (holder), not (X_train, y_train, X_val, y_val)
+    directly, and pops each array out of it rather than receiving them as
+    positional arguments. This is not a style choice -- measured directly
+    on this interpreter (Python 3.10.12, via weakref + RssAnon, not
+    assumed) that a caller's own reference to a large array survives for
+    the ENTIRE duration of any call where that array is a positional
+    argument, whether the caller binds it to a name first or unpacks a
+    producer's return value inline (`f(*g())` measured no different from
+    `X = g(); f(X)`) -- CPython's call mechanism keeps the caller's
+    evaluation-stack slot alive until the call returns either way. A
+    version of this function that took (X_train, X_val, ...) directly
+    would have its own internal `del X_train` free only ITS OWN local
+    reference; scripts/train_static.py::main(), which also holds X_train,
+    would keep the full ~18GB array resident for this function's ENTIRE
+    body -- both Dataset() constructs AND the full boosting call --
+    defeating the whole point of freeing it early (this is exactly what
+    happened: Attempt 3 crashed at ~36.6GB RSS with this bug still present).
+
+    The fix: the caller builds a plain dict whose values are the arrays --
+    never binding them to a separate name of its own (see
+    scripts/train_static.py::main()) -- and this function pops each array
+    out of the dict (removing the dict's reference) before using and
+    deleting it. The caller's persistent reference is to the dict object,
+    not to the arrays inside it; once popped, nothing the caller holds
+    still points to the array, so this function's `del` genuinely drops
+    the last reference. Verified with weakref.ref() + RssAnon before this
+    pattern was adopted, not assumed to work.
+
+    train() below is a thin backward-compatible wrapper for callers that
+    already hold plain X_train/X_val arrays (small-scale use, future
+    tests) -- it does NOT get the same guaranteed mid-call freeing, since
+    ITS caller still holds its own reference for the wrapper's call
+    duration, same as before this fix.
+    """
+    X_train = holder.pop("X_train")
+    y_train = holder.pop("y_train")
+    X_val = holder.pop("X_val")
+    y_val = holder.pop("y_val")
+
     hp = {**DEFAULT_PARAMS, **(params or {})}
     feature_count = X_train.shape[1]
     # free_raw_data=True lets LightGBM drop its own copy of the raw float32
@@ -151,19 +196,47 @@ def train(
     # histograms) for the entire boosting run -- on the full 2.34M-row
     # EMBER2024 train split, free_raw_data=False was enough to OOM-kill
     # training on a 38GB machine even after fixing the data-loading path.
-    # X_val's raw array is still needed after training for calibration, but
-    # that reads the `X_val` parameter directly, not anything from val_set,
-    # so val_set's own internal copy can be dropped too.
     # two_round=True makes Dataset construction itself use a lower-peak-memory
     # loading strategy rather than holding the full unbinned array alongside
     # the binned representation during construction.
-    train_set = lgb.Dataset(X_train, label=y_train, free_raw_data=True, params={"two_round": True})
-    val_set = lgb.Dataset(X_val, label=y_val, reference=train_set, free_raw_data=True, params={"two_round": True})
-    # X_val is NOT deleted here -- the calibration step below calls
-    # booster.predict(X_val, ...) directly on this raw array (not on
-    # val_set), so it has to survive past lgb.train(). Only X_train is
-    # safe to drop: nothing references it again after Dataset construction.
+    #
+    # num_threads is set here explicitly -- Dataset construction (binning
+    # 2568 features) otherwise runs with LightGBM's own default thread
+    # count (effectively every core on the machine), NOT the n_jobs cap
+    # in DEFAULT_PARAMS below, since that dict is only ever passed to
+    # lgb.train(), never to lgb.Dataset(). A prior crash on this machine
+    # showed ~7GB of available memory disappear in a single 21-second
+    # window immediately after the loader finished and inside these two
+    # Dataset() calls -- far faster than the loader's own steady per-batch
+    # pace, consistent with uncapped parallel binning across 2568 features
+    # rather than a gradual leak. Matching DEFAULT_PARAMS["n_jobs"] here
+    # closes that gap instead of guessing at a new number.
+    #
+    # lgb.Dataset(...) itself is LAZY -- it just stores a reference to the
+    # raw array (ds.data is X_train right after this call, confirmed via
+    # sys.getrefcount()); the actual binning, and free_raw_data=True's
+    # ds.data = None, only happen inside .construct() (called implicitly
+    # by lgb.train() otherwise). A prior fix's `del X_train, X_val` placed
+    # here, before .construct() ever ran, was a no-op -- train_set.data
+    # was still a live reference to the same array, so nothing was
+    # actually freed, and a follow-up real run showed RSS climb without
+    # plateauing (27GB -> 36.6GB, still rising when killed) because both
+    # raw arrays stayed resident simultaneously all the way through
+    # lgb.train()'s own internal construction of both Datasets. Calling
+    # .construct() explicitly and sequentially -- del'ing X_train only
+    # after train_set is actually constructed, before X_val/val_set are
+    # even touched -- makes free_raw_data's reference-drop happen when the
+    # code actually expects it to, not whenever lgb.train() gets around to
+    # it internally.
+    dataset_params = {"two_round": True, "num_threads": DEFAULT_PARAMS["n_jobs"]}
+    train_set = lgb.Dataset(X_train, label=y_train, free_raw_data=True, params=dataset_params)
+    train_set.construct()
     del X_train
+    gc.collect()
+
+    val_set = lgb.Dataset(X_val, label=y_val, reference=train_set, free_raw_data=True, params=dataset_params)
+    val_set.construct()
+    del X_val
     gc.collect()
 
     t0 = time.monotonic()
@@ -174,19 +247,81 @@ def train(
     )
     logger.info("Training done in %.1fs, best_iteration=%d", time.monotonic() - t0, booster.best_iteration)
 
-    calibrator = None
-    if calibrate:
-        # Textbook Platt scaling fits the logistic regression on the model's
-        # raw margins, NOT on probabilities. Fitting on booster.predict()'s
-        # sigmoid output -- an already-[0,1], near-separable distribution --
-        # collapses the calibrator into a near-step function and destroys
-        # rank resolution in the decision-boundary zone (the Cortex-Static
-        # calibration-saturation bug).
-        raw_val_margins = booster.predict(X_val, raw_score=True, num_iteration=booster.best_iteration)
-        calibrator = PlattCalibrator().fit(raw_val_margins, y_val)
-
-    return LGBMModel(booster=booster, calibrator=calibrator, feature_count=feature_count,
+    return LGBMModel(booster=booster, calibrator=None, feature_count=feature_count,
                       num_iterations=booster.best_iteration, model_hash=_model_hash(booster))
+
+
+def train(
+    X_train: NDArray[np.float32], y_train: NDArray[np.int32],
+    X_val: NDArray[np.float32], y_val: NDArray[np.int32],
+    *, params: Optional[dict[str, Any]] = None,
+    n_estimators: int = DEFAULT_N_ESTIMATORS,
+    early_stopping_rounds: int = DEFAULT_EARLY_STOPPING,
+) -> LGBMModel:
+    """Backward-compatible wrapper around train_from_holder() for callers
+    that already hold X_train/X_val as plain arrays (small-scale use,
+    future tests).
+
+    NOT identical to the committed-HEAD train(): that version took a
+    `calibrate: bool = True` kwarg and returned a Platt-calibrated model,
+    fit inline on X_val margins. This session's earlier calibrate-later
+    redesign (train() / calibrate() split, so cal's raw array is never
+    resident during Dataset construction + boosting) already removed that
+    -- this function always returns calibrator=None, has no `calibrate`
+    kwarg, and calibration only happens via a separate calibrate(model,
+    X_cal, y_cal) call, on a different split, after this returns. That
+    part is unchanged by today's fix.
+
+    What IS unchanged by today's fix, relative to the calibrate-later
+    version that immediately preceded it: same params, same Dataset
+    construction, same boosting call. Today's change is a
+    calling-convention change only (delegates to train_from_holder() via
+    a holder dict instead of doing the work inline) -- Step C and Step D
+    measured model_hash/best_iteration identical before and after this
+    specific change, on both a 20,000-row and a 500,000-row real slice.
+
+    Does NOT get train_from_holder()'s guaranteed mid-call freeing: THIS
+    function's own caller still holds its own reference to X_train/X_val
+    for the duration of this call, exactly as before this fix (see
+    train_from_holder()'s docstring for why that matters and when it
+    doesn't). scripts/train_static.py calls train_from_holder() directly
+    with a holder it builds and never separately names, precisely because
+    it needs that guarantee at real data scale.
+    """
+    return train_from_holder(
+        {"X_train": X_train, "y_train": y_train, "X_val": X_val, "y_val": y_val},
+        params=params, n_estimators=n_estimators, early_stopping_rounds=early_stopping_rounds,
+    )
+
+
+def calibrate(model: LGBMModel, X_cal: NDArray[np.float32], y_cal: NDArray[np.int32]) -> LGBMModel:
+    """Fit the Platt calibrator on a held-out cal split and return a new
+    LGBMModel with it attached. Deliberately separate from train(): cal's
+    raw array should only be loaded/resident AFTER boosting finishes and
+    X_train/X_val are already freed (see train()'s docstring) -- calling
+    this from a fresh cal load, not from arrays held since before training,
+    is what actually keeps cal out of the Dataset-construction/boosting
+    memory peak.
+
+    Textbook Platt scaling fits the logistic regression on the model's raw
+    margins, NOT on probabilities. Fitting on booster.predict()'s sigmoid
+    output -- an already-[0,1], near-separable distribution -- collapses
+    the calibrator into a near-step function and destroys rank resolution
+    in the decision-boundary zone (the Cortex-Static calibration-saturation
+    bug).
+
+    The margins come from X_cal, not X_val: best_iteration is chosen to
+    maximize separation on X_val, so val margins are optimistically
+    separated and a calibrator fit on them is over-confident on genuinely
+    unseen data (PDF review item 2). X_cal informs no fitting or
+    model-selection decision, so its margins are an honest basis for the
+    monotone probability map. Predicted at best_iteration, matching
+    inference.
+    """
+    raw_cal_margins = model.booster.predict(X_cal, raw_score=True, num_iteration=model.num_iterations)
+    calibrator = PlattCalibrator().fit(raw_cal_margins, y_cal)
+    return LGBMModel(booster=model.booster, calibrator=calibrator, feature_count=model.feature_count,
+                      num_iterations=model.num_iterations, model_hash=model.model_hash)
 
 
 def evaluate(model: LGBMModel, X_test: NDArray[np.float32], y_test: NDArray[np.int32],

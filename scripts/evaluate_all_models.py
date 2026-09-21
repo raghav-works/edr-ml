@@ -17,7 +17,7 @@ Models / splits covered
 1. Cortex-Static      data/models/cortex_static.lgbm
      val  = the 10% val slice re-derived from data/processed/ember2024_train.parquet
             with numpy's default_rng(seed=42) permutation and val_frac=0.10 --
-            the same construction scripts/train_static.py::_load_train_val_split
+            the same construction scripts/train_static.py::_load_train_val
             uses (row order within the slice is irrelevant to any metric here).
      test = data/processed/ember2024_test.parquet
      Reported 3-way (ALLOW / ALERT / BLOCK) against the true label, since

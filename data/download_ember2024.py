@@ -91,7 +91,8 @@ def download_and_dedup(split: str, out_path: Path) -> None:
     bounded-memory batches.
 
     Output schema: sha256, label, feature_0..feature_{EMBER2024_FEATURE_COUNT-1}
-    (float32) -- exactly what scripts/train_static.py::_split_xy expects.
+    (float32) -- exactly what scripts/train_static.py::_load_train_val /
+    _load_cal expect as their parquet schema.
     """
     seen: set[str] = set()
     n_before = 0
