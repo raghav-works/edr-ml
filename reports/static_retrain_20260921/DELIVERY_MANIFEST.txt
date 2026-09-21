@@ -1,0 +1,248 @@
+CORTEX-STATIC: DELIVERY MANIFEST (for agent/endpoint integration)
+Promoted: 2026-09-21 10:31:50 UTC
+Everything below is measured directly from the deployed artifacts/code, or
+read from the git-tracked config -- nothing is a claim without a source.
+
+============================================================
+0. BUILD ENVIRONMENT
+============================================================
+
+  Versions in this repo's venv (.venv/bin/python3, MEASURED just now):
+    python        3.10.12
+    lightgbm      4.7.0
+    numpy         2.2.6
+    scikit-learn  1.7.2
+    onnx          1.22.0
+    onnxmltools   1.16.0
+    skl2onnx      1.20.0
+    onnxruntime   1.23.2
+    pyarrow       25.0.1
+    pandas        2.3.3
+    scipy         1.15.3
+
+  Python that produced the deployed artifacts: 3.10.12. This repo has a
+  single venv (.venv/bin/python3.10 -> python3, created 2026-08-18); the
+  3.10.12 figure itself was directly measured earlier this session against
+  this same venv (a weakref/RssAnon interpreter-level test during the
+  memory-lifecycle investigation), not captured as an explicit version
+  string inside the training run's own log (train.log has no
+  "python --version" line) -- so "this venv trained the deployed model" is
+  MEASURED (only one venv exists, used for every command this session),
+  while "that venv's Python was exactly 3.10.12 at training time" is
+  INFERRED from the venv being unchanged since 2026-08-18 combined with
+  the direct measurement above, not read from the training run itself.
+
+============================================================
+1. DEPLOYED FILES (data/models/cortex_static.*, gitignored build outputs)
+============================================================
+
+  cortex_static.lgbm   78,558,257 bytes
+    sha256: acfa5a757aa13cd0708c00ca97f445ed86ab54d9a4e80505c7fd733157b02bea
+  cortex_static.meta   786 bytes
+    sha256: abef687e8ce6c7523918d85bbd0352bac5633502a1be9aadc1e45f2682b630bc
+  cortex_static.onnx   61,450,626 bytes
+    sha256: 636c77c5c536bf3ba2996205206c718d481708b39e7bb0007e4b3535874b4944
+
+  LGBMModel.model_hash (first 16 hex chars of the .lgbm sha256, as read
+  back via models.static_lgbm.LGBMModel.load(...).model_hash):
+    acfa5a757aa13cd0
+  Booster: 3000 boosting rounds (num_trees()).
+
+============================================================
+2. THRESHOLDS (config/thresholds.yaml, static: section)
+============================================================
+
+  allow_below:       0.4789517595186417   (score <  this -> ALLOW)
+  block_at_or_above:  0.9811748406902472   (score >= this -> BLOCK, else ALERT)
+
+  These thresholds are paired ONLY with the artifact hashes in section 1
+  above -- do not reuse them against a differently-hashed cortex_static.*.
+
+============================================================
+3. ONNX RUNTIME CONTRACT (read from onnxruntime.InferenceSession, live)
+============================================================
+
+  input:  name="input"                  shape=[None, 2568]  dtype=float32
+  output: name="malicious_probability"  shape=[None]         dtype=float32
+
+  Feature order: EMBER2024 feature_0 .. feature_2567, float32, in the same
+  column order the training parquet used (features.pe_features.
+  PEFeatureExtractor.feature_vector_with_report() produces this vector in
+  inference; do not reorder columns).
+
+  Output meaning: a single calibrated malicious-probability score per row
+  (the graph merges the LightGBM tree ensemble's raw margin with the Platt
+  calibrator subgraph -- the ONNX output is already the calibrated
+  probability, not a raw booster margin).
+
+============================================================
+4. VERDICT SEMANTICS (inference/policy_engine.py::static_verdict_from_score)
+============================================================
+
+  score <  allow_below           -> ALLOW
+  allow_below <= score < block_at_or_above  -> ALERT
+  score >= block_at_or_above     -> BLOCK
+
+  IMPORTANT: a static BLOCK verdict is currently policy-capped to ALERT by
+  inference/policy_engine.py::decide() (the interim corroboration-gated
+  cap, OPEN_ITEMS.md item 2) unless corroborated by another signal --
+  unchanged by this retrain. Do not assume a static BLOCK score reaches a
+  BLOCK final_decision on its own.
+
+============================================================
+5. KNOWN ONNX-VS-PYTHON BEHAVIOUR (MEASURED, 234,000-row cal split,
+   2026-09-21, post-promotion smoke test -- reports/static_retrain_20260921/
+   and OPEN_ITEMS.md's "The one authorized test read" section)
+============================================================
+
+  max_abs_err=3.571906e-02  mean_abs_err=2.979517e-06  (mid-range float32
+  TreeEnsemble limitation, already accepted elsewhere in this repo for
+  Cortex-Network, commit 6e8d50c)
+
+  Flips across the deployed thresholds, cal split (234,000 rows):
+    ALLOW (0.4789517595186417):       1 flip
+    BLOCK (0.9811748406902472):       1 flip
+  (A separate, earlier full-234,000-row cal check across three threshold
+  candidates -- including the superseded BLOCK@0.001 precedent value, not
+  used in deployment -- found 4 flips total; 2 of those 4 are at the pair
+  actually deployed, matching the 1+1 above.)
+
+============================================================
+6. TEST RESULTS (ONE-TIME held-out read, 2026-09-21, MEASURED)
+============================================================
+
+  n=539,940 (269,940 benign / 270,000 malicious)
+  AUC (calibrated): 0.998778
+  ALLOW: FPR=0.012129 (FP=3274/269940, 95% CI [0.011719,0.012549]), detection=0.9821
+  BLOCK: FPR=0.001011 (FP=273/269940, 95% CI [0.000895,0.001139]), detection=0.9149
+    -- this CI contains the architecture doc's 0.1% bar: BLOCK is AT the
+       bar on held-out data, not demonstrably below it.
+
+  Full raw output: reports/static_retrain_20260921/eval_static_retrain_test.txt
+  (sha256 fd8869fe3f59d738bc7b47c9f44fb94ca83f0adf7d1c5614d21b1ecc144c27ab)
+
+============================================================
+7. CONSUMING cortex_static.meta / .lgbm VS. cortex_static.onnx
+============================================================
+
+  cortex_static.meta is a Python PICKLE (models/static_lgbm.py:121-122
+  writes it via pickle.dump(meta, fh, protocol=pickle.HIGHEST_PROTOCOL);
+  :128-129 reads it via pickle.load(fh) -- confirmed by disassembling the
+  actual deployed file with pickletools, and by loading it: its dict is
+  {'calibrator': <models.static_lgbm.PlattCalibrator>, 'feature_count':
+  2568, 'num_iterations': 3000, 'model_hash': 'acfa5a757aa13cd0'}).
+  PlattCalibrator wraps sklearn.linear_model.LogisticRegression
+  internally (models/static_lgbm.py:63-74) -- unpickling it needs BOTH
+  the models.static_lgbm module (for the PlattCalibrator class) and a
+  scikit-learn compatible with the pinned range in requirements.txt
+  (scikit-learn>=1.4,<2.0). Evidence (pickletools.dis() on the actual
+  deployed cortex_static.meta, GLOBAL/STACK_GLOBAL opcodes -- the two
+  classes the pickle stream references by module+name, byte offsets
+  shown):
+    offset  66 STACK_GLOBAL  'models.static_lgbm' 'PlattCalibrator'
+    offset 133 STACK_GLOBAL  'sklearn.linear_model._logistic' 'LogisticRegression'
+  Loading a pickle executes arbitrary code by design -- do this ONLY for
+  files produced by this repo's own training pipeline, never for an
+  untrusted or externally-supplied .meta file.
+
+  scikit-learn does not guarantee that a pickled estimator loads across
+  versions; these artifacts were built with scikit-learn 1.7.2 (section
+  0). Use the same version, or use the ONNX file, which has no such
+  dependency. The repo's requirements.txt range (>=1.4,<2.0) is a
+  supported-runtime range, not a pickle-compatibility guarantee.
+
+  cortex_static.onnx already contains the Platt calibrator baked into the
+  graph (section 3 above) -- a non-Python consumer, or any consumer that
+  wants to avoid the pickle-loading requirement above, needs ONLY
+  cortex_static.onnx plus the two full-precision thresholds in section 2.
+  It does not need cortex_static.lgbm or cortex_static.meta at all.
+
+============================================================
+8. THRESHOLD RELOAD SEMANTICS
+============================================================
+
+  inference/policy_engine.py:57 loads config/thresholds.yaml exactly ONCE,
+  at module import time (`_THRESHOLDS = _load_thresholds()` -- a
+  module-level statement, not re-read per call). Any process that has
+  already imported inference.policy_engine will NOT pick up a
+  config/thresholds.yaml edit until it is restarted.
+
+============================================================
+9. KNOWN LIMITATIONS
+============================================================
+
+  (a) Static BLOCK is capped to ALERT by the interim corroboration-gated
+      policy (inference/policy_engine.py::decide(); OPEN_ITEMS.md, heading
+      "Item 2 interim BLOCK cap -- this pass does NOT lift it") unless
+      corroborated by another signal. A static-only BLOCK score does not
+      reach a BLOCK final_decision by itself.
+
+  (b) Real-world sanity check (5 local validation files, read-only,
+      non-gating, no statistical weight -- OPEN_ITEMS.md's "Promotion"
+      section): features extracted once per file via
+      features.pe_features.PEFeatureExtractor().feature_vector_with_report(),
+      scored with the OLD (pre-promotion backup) and NEW (deployed) model
+      on the identical vector:
+
+      | file | sha256[:16] | old score | new score | delta | old verdict | new verdict |
+      |---|---|---|---|---|---|---|
+      | svchost.exe | 75772da68f23bee2 | 0.877460 | 0.942081 | +0.0646 | ALERT | ALERT |
+      | notepad_test.exe | ab15a95de88ab062 | 0.005642 | 0.023364 | +0.0177 | ALLOW | ALLOW |
+      | benign_test_50mb.exe | fce08e3382e46073 | 0.980467 | 0.984642 | +0.0042 | BLOCK | BLOCK |
+      | notepadd.exe | d38ba15bd8df9bdd | 0.935731 | 0.960786 | +0.0251 | ALERT | ALERT |
+      | extractor.exe | 71506a193d361743 | 0.989866 | 0.993514 | +0.0036 | BLOCK | BLOCK |
+
+      All 5 are documented as **benign** in PROJECT_HISTORY_REPORT.md,
+      "ERA 3 -- cortex-ml (clean, independent reproduction -- five
+      signals)" > "Commit 1 -- `6cd4131`" section, "Known limitation --
+      calibration saturation (production-readiness DOWNGRADED,
+      2026-08-28)" table (that file has uncommitted local edits; cite by
+      section, not line) (svchost.exe: benign, signed MS; notepad_test.exe: benign;
+      benign_test_50mb.exe: benign; notepadd.exe: benign; extractor.exe:
+      benign, PyInstaller). Two of them -- benign_test_50mb.exe and
+      extractor.exe -- score at or above BOTH the new BLOCK threshold
+      (0.9811748406902472) and the old one (0.9798998555119341); no
+      verdict changed for any file; all five scores rose. The cause of
+      that uniform increase was NOT investigated -- INFERRED: a
+      combination of a different booster and a different calibrator, not
+      isolated by any ablation. PROJECT_HISTORY_REPORT.md's own prior
+      analysis (same section as above; that file has uncommitted local
+      edits, cite by section, not line) already documents
+      svchost.exe/notepadd.exe/benign_test_50mb.exe/extractor.exe scoring
+      ALERT/BLOCK under the PRE-retrain model too, as a known
+      calibrator-saturation + pe_features.py-vs-thrember feature-fidelity
+      gap (item 7, unresolved) -- a pre-existing, documented condition,
+      not something this retrain introduced or fixed, and exactly why the
+      static BLOCK cap stays in place.
+
+  (c) The test BLOCK FPR 95% CI ([0.000895, 0.001139]) contains the
+      architecture doc's 0.001 (0.1%) bar. BLOCK is AT that bar on
+      held-out data, not demonstrably below it (section 6 above).
+
+  (d) The feature-extraction fidelity gap (open item 7:
+      pe_features.py-vs-thrember skew) is UNTOUCHED by this retrain.
+      OPEN_ITEMS.md's "Item 2 interim BLOCK cap -- this pass does NOT
+      lift it" heading states the three removal criteria for the cap are
+      "ALL required, and all three are the thrember feature-parity
+      cluster (item 7 ... )" and that "The retrain fixes *calibration and
+      threshold discipline*, not *feature fidelity* or *booster
+      ranking*". inference/policy_engine.py's decide() docstring (cited
+      there) is the source of the removal-criteria list; the same
+      heading also states this retrain lands only item 8's ExportsInfo
+      fix ("one small input-fidelity gain") -- item 7 itself is
+      untouched.
+
+  (e) Per-signal precision at low prevalence, MEASURED on the one-time
+      test read, thresholds held fixed (reports/static_retrain_20260921/
+      eval_static_retrain_test.txt, test-split deployment-prevalence
+      projection tables): at the BLOCK boundary, PPV is 0.4752 at 1
+      malicious per 1,000, 0.0830 at 1 per 10,000, 0.0090 at 1 per
+      100,000 -- about 10 false positives per 10,000 benign files
+      regardless of prevalence. At the ALLOW boundary (escalate = ALERT
+      or BLOCK), PPV is 0.0750 / 0.0080 / 0.0008 at the same three
+      prevalences -- about 121 false positives per 10,000 benign files.
+      These are per-signal figures: the eval file's own header states the
+      combined pipeline's ALERT/NEEDS_REVIEW/TERMINATE volume through
+      decide() is NOT modelled here (that needs a file-population model
+      this repo does not have), and the real base rate of malicious files
+      in any deployment is unknown.

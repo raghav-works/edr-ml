@@ -183,6 +183,936 @@ The static session also lands item 8's residue and re-checks the BLOCK cap
 (item 2 interim cap NOT lifted — see below). See "Progress" under
 "Implementation sequence" for exactly what the memory/network half changed.
 
+**What "frozen val/test" means for static, recorded before the static
+session touches anything (2026-09-18):** memory/network's `val`/`test`
+parquets are frozen **byte-identical** — nothing about their generation
+changed, so a SHA-256 of the files themselves matches pre- and post-retrain.
+Static cannot use that same literal test, because step (a) of this session
+regenerates the EMBER2024 parquets specifically to land item 8's
+`ExportsInfo` fix — which changes the *feature values* for every row,
+`val`/`test` included, by design. For static, "frozen" instead means: the
+same **row identity** (the deduped SHA-256 set, produced by the same
+deterministic first-occurrence dedup order over an unchanged local HF
+cache) stays in `val`/`test` throughout, and that split is never read by
+calibration or threshold-derivation (`cal` only) until everything is
+frozen and `test` is read exactly once at the end for reported numbers.
+What changes deliberately is the feature vector under each row, not which
+rows are in the split. This is proven, not assumed, by comparing the
+regenerated `ember2024_test.parquet`'s `sha256` column (as a set) against
+the pre-regeneration file's, not by comparing file bytes.
+
+**Static retrain OOM investigation, in progress (2026-09-21) — see
+correction below before trusting any max_bin number.** Three real
+`scripts.train_static` attempts on the new `cal`-carved split all failed
+during `lgb.Dataset.construct()` (2568 features), not during boosting.
+Fixed so far, each verified: (1) `lgb.Dataset(..., params={"two_round":
+True})` never inherited `DEFAULT_PARAMS["n_jobs"]` — construction ran with
+this machine's full uncapped thread count; now passes `num_threads`
+explicitly. **Real-data Attempt 3** (task `bkjigfpc4`/`bwu5jrb3z`, PID
+80149, `python -m scripts.train_static` on the actual EMBER2024 train
+parquet, properly-fixed v3 watchdog) tested fix (1) alone and shows it is
+**not sufficient by itself**: `proc_rss_kb` climbed 19.31 GB → 36.58 GB
+over 123 seconds, still rising, before the watchdog killed it (raw lines
+in `mem_watchdog_train_v3.log`). (2) `lgb.Dataset()` is lazy (`ds.data is
+X_train` stays true until `.construct()` actually runs, confirmed via
+`sys.getrefcount()`) — an earlier `del X_train, X_val` placed before
+`lgb.train()` was a no-op, since construction hadn't happened yet; fixed
+by calling `.construct()` explicitly and deleting each raw array
+immediately after its own Dataset is constructed, before the next one is
+built. **Fix (2) has only been verified mechanistically on small
+synthetic arrays (confirms del actually frees memory once construct() has
+run) — it has never been tested against real data at real scale, alone or
+combined with fix (1).** The real-scale test that would have answered
+that question used the contaminated synthetic generator (see correction
+below) and is invalid — so whether fixes (1)+(2) together are sufficient
+at real scale is still genuinely open, not "neither fix was sufficient"
+as an earlier version of this note incorrectly implied by citing the
+invalidated synthetic reading as if it were that test.
+
+**Correction (2026-09-21): the two real-scale `max_bin` readings (255 →
+"31.7 GB", 127 → "35.8 GB") are INVALID, not evidence either way.** Both
+test scripts generated synthetic data via the legacy `np.random.random(
+(1_872_000, 2568)).astype(np.float32)`, which always returns float64 --
+the `.astype(np.float32)` conversion is a second step. At this scale the
+float64 temporary alone is 35.82 GiB (`1_872_000 * 2568 * 8 / 1024**3`,
+confirmed by direct computation), large enough to trigger the watchdog by
+itself, before `lgb.Dataset.construct()` was ever reached. The `max_bin=
+127` run's log shows only `"baseline: 165 MB"` -- the next print
+(`"after allocating X_train"`) never appears, and the process exited 143
+(SIGTERM), consistent with being killed mid-generation. **`max_bin` is
+therefore UNRESOLVED, not ruled out**, and needs re-testing with
+float32-native generation (`Generator.random(shape, dtype=np.float32)`,
+chunked if needed) before any conclusion is drawn.
+
+**What remains valid from this investigation (measured at a smaller,
+uncontaminated 500,000-row scale, where the generator's float64 temporary
+is freed by Python's refcounting before the next statement samples RSS):**
+- Thread count does not meaningfully affect construction overhead:
+  8,055 MB (`num_threads=6`) vs 8,038 MB (`num_threads=2`) -- ruling out
+  further thread-count tuning as a lever.
+- Constructing a `Dataset` from a pre-built `save_binary()` file needs far
+  less memory than constructing from an in-memory array at the same
+  scale: 1,237 MB vs 8,055 MB (~6.5x). Not directly applicable yet --
+  building that binary file still requires the expensive in-memory
+  construction once -- but confirms the *binned* representation itself is
+  cheap; the cost is in binning from a raw array.
+- LightGBM's own construction warning states `two_round` only helps when
+  loading directly from a text file, not from an in-memory array --
+  meaning it may never have reduced peak memory for this codebase's
+  in-memory-array construction path. The follow-up text-file experiment
+  was abandoned (a naive per-row Python writer was far too slow to
+  time-box, and a real text file at 2,568 columns would run ~35-45 GB
+  on disk) -- deprioritized in favor of investigating `lgb.Sequence`
+  (LightGBM's streaming/batched construction API, reads from a source
+  like a memmap instead of a fully-materialized array) as the next lead.
+
+Hard constraints for the remainder of this investigation: no system swap
+changes, no `num_leaves`/learning-hyperparameter changes, no full real
+training run, until a verified, time-boxed fix is agreed. `max_bin` and
+`bin_construct_sample_cnt` are measured and reported, never applied to the
+real pipeline without explicit sign-off.
+
+### Step 1 — loader audit (2026-09-21): the loader is clean — MEASURED
+
+Instrumented `scripts/train_static.py::_load_train_val` with temporary
+RssAnon markers (removed after), run on the real train parquet under the
+v3 watchdog. **PASS** — `X_train`/`X_val` are float32 (not float64),
+C-contiguous (not Fortran-ordered), and RssAnon right before any
+`lgb.Dataset` call (21,353 MB) is within ~3.5% of the theoretical minimum
+for holding both raw arrays once (20,634.7 MB) — not a double-hold. The
+one plausible double-copy line found while reading the code
+(`X_train[tr_mask]`, boolean-mask fancy indexing) does not fire on real
+data: the real `ember2024_train.parquet` has zero `label == -1` rows
+(MEASURED: 1,170,000/1,170,000 exact split), confirmed by marker(a) ==
+marker(b) (21,595 MB both) showing the mask-filter step allocated nothing.
+Conclusion: the growth happens inside `lgb.train()`, not the loader.
+
+### Step 2 — scaling/lever investigation (2026-09-21)
+
+Full real-data (not synthetic) scaling curves at 250K/500K/1M rows,
+production Dataset/booster params, RssAnon via a 20ms internal poller
+thread + the v3 watchdog for the 1M runs. Real EMBER2024 data is ~30%
+non-zero (MEASURED: `nonzero_frac` 0.2997–0.3019 across all three sizes)
+— a real, substantive difference from the earlier invalidated
+100%-non-zero synthetic tests, alongside the RssAnon-vs-plain-RSS fix.
+
+**Numpy path (production params, MEASURED):**
+
+| N_ROWS | (a) baseline MB | (b) peak construct MB | (b) peak-above-baseline MB | (c) steady after free MB | (d) peak train(2 rounds) MB |
+|---|---|---|---|---|---|
+| 250,000 | 3,626.2 | 5,920.9 | 2,294.7 | 3,164.6 | 4,231.9 |
+| 500,000 | 6,012.1 | 8,583.5 | 2,571.4 | 3,685.5 | 6,658.5 |
+| 1,000,000 | 10,898.9 | 14,628.1 | 3,729.1 | 4,832.0 | 10,908.3 |
+
+**`lgb.Sequence` path (disk-backed `.npy`, `mmap_mode="r"`, production
+params, MEASURED):**
+
+| N_ROWS | (a) baseline MB | (b) peak construct MB | (b) peak-above-baseline MB | (c) steady MB | (d) peak train(2 rounds) MB |
+|---|---|---|---|---|---|
+| 500,000 | 896.1 | 8,740.5 | 7,844.4 | 5,863.7 | 7,298.1 |
+| 1,000,000 | 907.7 | 8,751.2 | 7,843.5 | 6,894.8 | 11,306.3 |
+
+**MEASURED finding:** Sequence-path peak-above-baseline is essentially
+flat between 500K and 1M rows (7,844.4 → 7,843.5 MB) — consistent with
+LightGBM's default `bin_construct_sample_cnt=200,000` (a fixed row count,
+required as float64 per a directly-reproduced error:
+`ValueError('sample_data[0] type float32 is not double')`) dominating the
+construct-phase cost, not the actual data volume.
+
+**`bin_construct_sample_cnt=50,000` vs default 200,000, Sequence path, 500K
+rows only, MEASURED, NOT applied anywhere:** construct peak 8,740.5 MB →
+2,826.5 MB, a 5,914 MB (~68%) reduction. LightGBM printed
+`"Using too small bin_construct_sample_cnt may encounter unexpected errors
+and poor accuracy"` — a real accuracy tradeoff, needs explicit sign-off
+before ever being applied.
+
+**`max_bin=127` vs production default 255, numpy path, 500K rows,
+MEASURED with a corrected float32-native generator:** peak-above-baseline
+2,563.0 MB vs 2,571.4 MB — an 8.4 MB (0.3%) difference. Confirms the
+prediction that 1-byte-per-bin-index storage makes bin count nearly
+irrelevant to construct-time memory; **`max_bin` is not a useful lever**
+(this supersedes the two earlier invalidated real-scale readings, which
+used a contaminated float64-producing generator).
+
+**Extrapolation to the real split (1,872,000 train / 234,000 val),
+INFERRED from linear fits on the above (thin: 3 points numpy, 2 points
+Sequence):** numpy-path peak during `train_set.construct()` ≈ 26,035 MB
+(≈25.4 GiB); Sequence-path construct peak ≈ 8,752 MB (≈8.55 GiB). Danger
+line at time of estimate: 15% of 38.72 GiB total = 5.81 GiB available;
+~30.66 GiB of headroom given other processes' usage at that moment (this
+drifts with other processes' load and is not a fixed number).
+
+### Step 3 — root cause found: a lingering caller-side reference — MEASURED
+
+Read-only audit (Step 3-0) of `scripts/train_static.py::main()` and
+`models/static_lgbm.py::train()` found that `main()`'s own
+`X_train`/`X_val` local bindings stay alive for `train()`'s **entire**
+call — `del X_train` inside `train()` only removes `train()`'s own local
+name, which has no effect on a separate binding of the same name in the
+caller's frame. This means the earlier `.construct()`-then-`del` fix
+(Step 2 precursor) never actually freed anything when called through
+`main()` — both raw arrays (~20.6 GiB combined) stayed resident through
+both `Dataset()` constructs *and* the full boosting call. **INFERRED**:
+this plausibly explains Attempt 3's 36.6 GiB peak (raw ~20.6 GiB never
+freed + binned ~5.4 GiB + boosting overhead ~11.9 GiB ≈ 38 GiB, close to
+the 36.6 GiB kill) — that arithmetic draws on the Step 2 fits, not a
+direct measurement of Attempt 3 itself.
+
+**Step A, MEASURED on this exact interpreter (Python 3.10.12):** tested
+three calling patterns with `weakref.ref()` + RssAnon. The originally
+proposed one-line fix (`callee(*producer())`) does **not** work — weakref
+stays alive, RssAnon drop = 0.0 MB, identical to the buggy pattern. Only a
+holder-dict pattern (caller passes a dict, callee `.pop()`s each array out
+before its own `del`) reliably frees the array mid-call: weakref dies,
+RssAnon drop = 76.3 MB, matching the test array's exact size. CPython's
+evaluation stack retains a reference to a call's arguments for the call's
+full duration regardless of calling convention (named variable or
+unpacked temporary) — only removing the array from an intermediate
+container the callee empties avoids this.
+
+**Fix implemented:** new `models/static_lgbm.py::train_from_holder(holder,
+...)` pops `X_train`/`y_train`/`X_val`/`y_val` out of a plain dict instead
+of receiving them as positional arguments; `train()` becomes a thin
+backward-compatible wrapper (unchanged signature, still used by any future
+small-scale caller) that just builds a holder and delegates.
+`scripts/train_static.py::main()` now builds its holder directly from
+`_load_train_val()`'s return tuple via `dict(zip(...))`, never binding
+`X_train`/`X_val` to a name of its own. New regression test
+`tests/test_static_lgbm_train.py::test_train_from_holder_frees_raw_arrays`
+asserts both weakrefs are dead after the call — proven, not assumed, to
+catch a reversion (Step A's mechanism is identical to what this test
+checks).
+
+**Step C, MEASURED (20,000-row real slice, `n_estimators=2`):** OLD
+calling pattern run twice (`model_hash=1cda50972cacd74b`,
+`best_iteration=2`, identical both times — baseline is deterministic) vs
+NEW pattern (`model_hash=1cda50972cacd74b`, `best_iteration=2`) —
+identical. No behavior change from the fix.
+
+**Step D, MEASURED (500,000-row real slice, `n_estimators=2`, 450K
+train / 50K val):**
+
+| | OLD (plain bound names) | NEW (holder pattern) |
+|---|---|---|
+| RssAnon after train construct | 8,241.1 MB | 8,219.9 MB |
+| RssAnon at next construct call (= after del+gc.collect()) | 8,241.1 MB (**0.0 MB drop**) | 3,811.7 MB (**4,408.2 MB drop**, expected 4,408.3 MB for this split's 450K-row train) |
+| lgb.train peak | 10,771.5 MB | 6,025.3 MB |
+| Final RssAnon | 8,138.5 MB | 3,101.5 MB |
+| `model_hash` / `best_iteration` | `cd2205801c55e20c` / 2 | `cd2205801c55e20c` / 2 (identical) |
+
+The OLD pattern's exact **zero** drop at the freed-array checkpoint is
+direct proof of the bug; the NEW pattern's 4,408.2 MB drop (matching the
+450K-row `X_train`'s expected 4,408.3 MB almost exactly) is direct proof
+of the fix, with identical `model_hash`/`best_iteration` confirming no
+behavior change at this larger scale either.
+
+**Follow-ups (2026-09-21), MEASURED:** a negative-control scratchpad check
+(same weakref assertions as the regression test, called through `train()`
+with the arrays bound to caller names) confirmed both weakrefs stay
+**alive** — the opposite of the real test's result — proving the test's
+assertions genuinely discriminate between the two patterns rather than
+being a tautology. `train()`'s wrapper docstring corrected: it previously
+claimed to behave "identically to the pre-refactor train()", which was
+imprecise — committed HEAD's `train()` took a `calibrate: bool = True`
+kwarg and returned a calibrated model; this session's earlier
+calibrate-later redesign (train()/calibrate() split, prior to today's
+holder-pattern fix) already removed that. The docstring now states
+`train()` is unchanged only relative to the calibrate-later version that
+immediately preceded today's fix, not relative to committed HEAD.
+
+### Full-scale (1,872,000 train / 234,000 val) dry run — MEASURED, 2026-09-21
+
+Real `scripts.train_static.main()`, real split, `n_estimators=2` (the only
+behavior-changing monkeypatch — everything else was a transparent
+before/peak/after/wall-time logging wrapper), outputs to scratchpad, run
+under the corrected v3 watchdog. **Completed successfully, no watchdog
+ALERT, minimum available memory during the whole run was 10.10 GiB**
+(never approached the 5.81 GiB kill line). Confirmed via git status and
+file mtimes: nothing under `data/models/cortex_static*` or `config/`
+changed.
+
+| Phase | wall_s | RssAnon before | RssAnon peak | RssAnon after |
+|---|---|---|---|---|
+| `_load_train_val` | 59.799 | 91.9 MB | 22,022.5 MB | 21,352.0 MB |
+| `lgb.Dataset.construct` (train) | 53.032 | 21,352.0 MB | **27,752.1 MB** | 27,754.4 MB |
+| *(gap: `del X_train; gc.collect()`)* | | | | **→ 9,416.0 MB** |
+| `lgb.Dataset.construct` (val) | 7.278 | 9,416.0 MB | 9,434.9 MB | 9,434.9 MB |
+| `lgb.train` (2 rounds) | 28.526 | 7,142.8 MB | **19,837.0 MB** | 7,981.8 MB |
+| `_load_cal` | 19.109 | 7,981.8 MB | 12,642.8 MB | 10,372.2 MB |
+| `calibrate` | 0.563 | 10,372.2 MB | 10,372.2 MB | 10,372.2 MB |
+| process end (after `main()` + `gc.collect()`) | — | — | — | 8,080.0 MB |
+
+**Drop when the raw train array is freed: 27,754.4 → 9,416.0 MB =
+18,338.4 MB (17.91 GiB)** — matches the INFERRED expectation
+(`1,872,000×2568×4/1024²` = 18,340.1 MB = 17.91 GiB) almost exactly (off
+by 1.7 MB, 0.009%). The fix holds at full real scale, not just at the
+500K-row scale Step D measured.
+
+**Result vs. the stated PASS bars:**
+
+| Bar | Threshold | Measured | Status |
+|---|---|---|---|
+| Freed-array drop | ~17–18 GiB | 17.91 GiB | clears |
+| RssAnon after train construct+free | ≤~11 GiB | 9.20 GiB | clears |
+| Boosting-phase peak | ≤~20 GiB | 19.37 GiB | clears |
+| **Overall process peak** | **at or below ~27 GiB** | **27.10 GiB** | **exceeds by ~100 MB (0.4%)** |
+
+3 of 4 bars clear; the overall-peak bar is marginally exceeded. Per
+instruction, this is reported as NOT a clean PASS rather than rounded
+into one — flagged for discussion, not treated as blocking on my own
+judgment given how small the margin is relative to the ~30 GiB of
+headroom that was never approached.
+
+### Real full-scale training run — completed 2026-09-21, MEASURED
+
+Real `scripts.train_static.main()`, full 3000-round budget (production
+`DEFAULT_PARAMS`, unchanged), the real split (1,872,000 train / 234,000
+val, `cal` loaded after training), launched detached (`setsid`+`nohup`),
+monitored by the memory logger and v3 watchdog for its entire run.
+**Completed cleanly — 0 watchdog ALERT lines for the whole run.**
+
+```
+INFO:cortex.scripts.train_static:train=1872000 val=234000 features=2568 ...
+INFO:cortex.static.train:Training done in 6040.8s, best_iteration=3000
+INFO:cortex.scripts.train_static:cal=234000
+[3000]  train's auc: 0.999999  val's auc: 0.999283
+Did not meet early stopping. Best iteration is:
+[3000]  train's auc: 0.999999  val's auc: 0.999283
+```
+
+- **Wall time: 6,040.8 s = 100.68 min.** `best_iteration=3000` — ran the
+  full budget without early stopping, same pattern as the deployed model
+  (2996/3000).
+- **Seconds/round, MEASURED: 6040.8 / 3000 ≈ 2.01 s/round.** This
+  *corrects* the earlier dry-run-based estimate of ~14.3 s/round, which
+  was INFERRED from a 2-round test — that figure was dominated by fixed
+  per-call startup cost (Dataset re-validation, first-round histogram
+  setup) that doesn't repeat per round; it was never a valid basis for
+  extrapolating to thousands of rounds, and is now superseded by this
+  direct measurement.
+- **Memory story:** dry-run construct peak 27.10 GiB (MEASURED, from the
+  earlier dry run). Real run's sampled maximum was 25.72 GiB
+  (`proc_rss_kb=26967196` at 07:32:44Z, watchdog's 20s interval) —
+  **INFERRED lower only due to 20–30s sampling being unable to see a
+  peak briefer than the sampling interval**, not evidence the real peak
+  was actually lower. Boosting itself ran flat at ~9.1–9.5 GiB for the
+  entire ~90+ minutes of sustained computation (confirmed via a 60s
+  per-thread CPU-time snapshot: 6 threads at 97–100% of one core each,
+  matching `n_jobs=6`) — notably, boosting never approached the dry run's
+  19.37 GiB `lgb.train` peak at any sampled point, a real but
+  INFERRED-explanation difference (plausibly a one-time setup cost tied
+  to the dry run's specific 2-round call, not confirmed). A brief bump to
+  10.09 GiB appeared during `cal` loading near the end, then the process
+  exited cleanly.
+- **Artifacts:** `data/models/cortex_static_retrain.lgbm`
+  (`acfa5a757aa13cd0708c00ca97f445ed86ab54d9a4e80505c7fd733157b02bea`,
+  78,558,257 bytes) + `.meta`
+  (`abef687e8ce6c7523918d85bbd0352bac5633502a1be9aadc1e45f2682b630bc`,
+  786 bytes) — saved to `~/cortex_static_retrain_run/retrain_sha256.txt`.
+  Deployed `data/models/cortex_static.{lgbm,meta,onnx}` re-verified
+  unchanged against the `~/cortex_static_backup_20260921` backup (exact
+  sha256 match on all three) throughout.
+- **Calibrator sanity, chronology corrected 2026-09-21 (MEASURED, via git
+  log, not the earlier imprecise version of this note):** new model's
+  Platt calibrator (`coef_≈0.991, intercept_≈0.139`) is essentially the
+  same shape/magnitude as the deployed model's (`coef_≈1.004,
+  intercept_≈0.087`) — both far from the historical saturated-calibrator
+  pattern (`coef_=10.66, intercept_=-5.13`) that `PROJECT_HISTORY_REPORT.md`
+  documents. The earlier version of this note said that pattern "predates
+  the currently-deployed model" -- imprecise. The exact chronology: the
+  deployed **booster** (`.lgbm`) was trained Aug 18, 14:22:54 (commit
+  `6cd4131`), *before* the raw-margin calibrator fix. That fix landed in
+  commit `6eed759` ("fit Platt calibrators on raw margins, not
+  probabilities") at Sep 8, 07:17:38 -- three weeks later. The deployed
+  **`.meta`** (calibrator) was regenerated at Sep 8, 07:22:54, only ~5m16s
+  after that fix commit -- a post-hoc recalibration of the *same,
+  unchanged* Aug 18 booster's margins using the newly-fixed code, not a
+  retrain. Threshold re-derivation (`6e8d50c`) followed ~12 minutes later
+  (07:34:51). So: the booster predates the fix by ~3 weeks; the calibrator
+  was refit after the fix, before ever being committed. The deployed model
+  was never the saturated 10.66/-5.13 calibrator -- that number describes
+  a different, already-superseded model version -- so "new vs. deployed"
+  here is a same-shape comparison between two already-fixed calibrators,
+  not a saturation-fix comparison.
+- **Hyperparameter proof:** every `DEFAULT_PARAMS` value (`num_leaves`,
+  `max_depth`, `learning_rate`, `min_child_samples`, `subsample`,
+  `colsample_bytree`, `reg_alpha`, `reg_lambda`, `min_split_gain`,
+  `is_unbalance`, `seed`, `histogram_pool_size`) matches the saved
+  booster's own recorded params exactly (via LightGBM's parameter
+  aliases) — confirmed by reading `model_to_string()`'s params directly,
+  not assumed. `max_bin=255` and `bin_construct_sample_cnt=200000` are
+  both LightGBM's own defaults, confirming neither of the two
+  measured-only levers from the OOM investigation (`max_bin=127`,
+  `bin_construct_sample_cnt=50000`) was ever applied to this run. Proves
+  only the memory-lifecycle fix changed — model configuration is
+  unchanged from the design.
+- **Val AUC caveat, stated plainly:** 0.999283 (new) vs. 0.999319
+  (deployed, from `EVAL_ALL_MODELS_RESULTS.txt`), a difference of
+  0.000036. **This is not apples-to-apples** — features changed
+  (`ExportsInfo` fix), training rows are ~11% fewer (`cal` now carved out
+  of what was train), and LightGBM's own per-round val AUC is on raw
+  scores while the evaluation harness reports calibrated-probability
+  AUC (mathematically identical ranking, same AUC value, but worth
+  naming since the two AUCs come from different code paths). The
+  difference is INFERRED to be within sampling noise — **unquantified**,
+  not proven. The frozen test-set read (once, at the end) is the real
+  comparison, not this val figure.
+
+**Cal-vs-test caveat, INFERRED:** the deployed model's own recorded
+numbers (`EVAL_ALL_MODELS_RESULTS.txt`, MEASURED) show val AUC 0.999319
+vs. test AUC 0.998841 -- test is measurably harder than val for this
+model family. If that pattern holds for the retrained model too, the
+cal-derived thresholds (also close to val in difficulty, per Step D
+below) are INFERRED likely to show a somewhat higher FPR on the frozen
+test split than their cal targets -- unquantified until the one real test
+read happens.
+
+**Old-model-must-not-be-rescored note:** the deployed model must NOT be
+re-scored against the regenerated (`ExportsInfo`-fixed) parquets for an
+old-vs-new comparison -- OPEN_ITEMS.md's own "frozen val/test" note
+above states the fix changes feature values for every row, so scoring the
+old model on new features would be a confounded comparison (different
+inputs, not just a different model). Old-vs-new must use the old model's
+**already-recorded** numbers (`EVAL_ALL_MODELS_RESULTS.txt`), not a fresh
+scoring run.
+
+### Threshold derivation tool: results against the real retrained model (2026-09-21)
+
+`scripts/derive_static_thresholds.py` (new) run against
+`data/models/cortex_static_retrain`, cal split only (234,000 rows,
+benign=116,862, malicious=117,138) -- MEASURED, raw sweep table with
+full-precision (`repr()`) thresholds, each reproduced-and-verified against
+the reported FP/TP counts before being printed (an assertion, not a
+claim):
+
+| target FPR | full-precision threshold | actual FPR (95% CI) | detection (95% CI) |
+|---|---|---|---|
+| 0.0001 | 0.9977410259813835 | 0.000094 ([0.000047,0.000168], 11/116862 FP) | 0.8489 ([0.846849,0.850960]) |
+| 0.0005 | 0.9811748406902472 | 0.000496 ([0.000377,0.000642], 58/116862 FP) | 0.9311 ([0.929659,0.932568]) |
+| 0.0010 | 0.9575215714986189 | 0.000993 ([0.000820,0.001190], 116/116862 FP) | 0.9518 ([0.950593,0.953054]) |
+| 0.0050 | 0.7320628018088604 | 0.004997 ([0.004601,0.005418], 584/116862 FP) | 0.9816 ([0.980773,0.982323]) |
+| 0.0100 | 0.4789517595186417 | 0.009995 ([0.009432,0.010582], 1168/116862 FP) | 0.9887 ([0.988040,0.989261]) |
+| 0.0200 | 0.22744200804171985 | 0.019955 ([0.019161,0.020773], 2332/116862 FP) | 0.9932 ([0.992726,0.993675]) |
+
+Cliffs (jump > 0.1) between 0.001→0.005, 0.005→0.01, and 0.01→0.02 -- the
+same cliff pattern the deployed model's own comments document (between
+0.005 and 0.01) -- recurring, not new. Thresholds non-increasing as
+target FPR grows: confirmed True. Peak RssAnon during the run: 5.17 GiB
+(manual ~5s-interval polling, may have missed a brief higher peak),
+comfortably under the 6 GiB guard throughout.
+
+**Candidate pair (same target-FPR precedent as the deployed model's own
+derivation, not a fresh choice): ALLOW at target 0.01 = `0.4789517595186417`,
+BLOCK at target 0.001 = `0.9575215714986189`.** This is a MENU item, not
+an applied decision -- `config/thresholds.yaml` is untouched.
+
+**ONNX export (MEASURED):** `data/models/cortex_static_retrain.onnx`,
+61,450,626 bytes, sha256
+`636c77c5c536bf3ba2996205206c718d481708b39e7bb0007e4b3535874b4944`, wall
+time 44.02s, peak RssAnon 1.79 GiB (manual polling).
+
+**ONNX parity on the first 50,000 cal rows, new ONNX file (MEASURED):**
+`max_abs_err=3.185e-2`, `mean_abs_err=4.374e-6`, `median=3.741e-8` --
+**0 verdict flips at both candidate thresholds**, matching the "0 flips"
+precedent from the deployed model's own parity check. Largest errors
+concentrate in mid-range score buckets ([0.05,0.5): max 3.19e-2;
+[0.5,0.95): max 1.08e-2), the same pattern as the documented pre-existing
+float32 TreeEnsemble limitation (roughly 3x the deployed model's ~1e-2
+max, same order of magnitude, same concentration). Deep-benign/malicious
+buckets show tiny errors (~3-4e-4), as expected far from any boundary.
+
+**Val-only validation of the candidate thresholds (MEASURED, 234,000 val
+rows, benign=117,001 malicious=116,999):** val AUC on calibrated
+probabilities = 0.999283, exactly matching LightGBM's own internal val
+AUC from training (difference -0.000000) -- confirms the Platt calibrator
+is monotone, as expected. ALLOW boundary: val FPR=0.010231
+([0.009662,0.010824]) vs. cal-derived CI [0.009432,0.010582] -- val point
+estimate falls inside the cal CI. BLOCK boundary: val FPR=0.001171
+([0.000983,0.001384]) vs. cal-derived CI [0.000820,0.001190] -- val point
+estimate falls inside the cal CI (near its edge). Both val CIs overlap
+their respective cal CIs substantially. This is validation only -- no
+threshold was adjusted based on this result. Val informed early stopping
+during training, though `best_iteration` hit the 3000-round cap without
+ever triggering early stopping, so val was read but never actually
+influenced the final model choice.
+
+**Read-only observation, not acted on (2026-09-21):** the saved booster's
+`bagging_fraction=0.8` with `bagging_freq=0` -- confirmed identical in
+the deployed model's own saved params. Checked the installed LightGBM
+package for `bagging_freq` documentation text: the pip wheel does not
+ship `Parameters.rst` (no `.rst` files anywhere in the installed
+package); the only occurrence of the string is inside the compiled
+`lib_lightgbm.so` binary, as an internal assertion:
+`"Check failed: (config->bagging_freq > 0 && config->bagging_fraction <
+1.0f && config->bagging_fraction > 0.0f) || (config->feature_fraction <
+1.0f && config->feature_fraction > 0.0f) ..."` -- MEASURED, extracted via
+`strings` on the actual installed binary, not fabricated prose. **This
+string only proves `bagging_freq` is a real, internally-checked
+parameter -- it does NOT itself demonstrate that `bagging_freq=0`
+disables bagging.** That specific behavioral claim is INFERRED from
+general LightGBM library knowledge/community documentation not shipped
+with this installed wheel (no `.rst` docs present) -- **unverified,
+correctly flagged by the maintainer as INFERRED until directly measured.**
+
+**P5 runtime test (2026-09-21), MEASURED -- not inferred:** trained three
+real boosters on the same 20,000-row real slice, same seed, same base
+params, `deterministic=True`, `num_boost_round=10`: (A) production values
+(`bagging_fraction=0.8, bagging_freq=0`); (B) `bagging_fraction=1.0,
+bagging_freq=0`; (C) positive control, `bagging_fraction=0.8,
+bagging_freq=1`. Compared `booster.model_to_string()`'s tree-structure
+section (everything before the `parameters:` block, which would trivially
+differ by the params text itself). **A's trees == B's trees, byte-for-byte
+identical** (122,607 characters each, exact string equality `True`) --
+changing `bagging_fraction` from 0.8 to 1.0 produced the *exact same
+model* when `bagging_freq=0`. **A's trees != C's trees** (122,607 vs
+113,155 characters) -- confirms the comparison method genuinely detects
+real differences when `bagging_freq` is actually nonzero, so A==B is not
+a testing artifact. **Conclusion: `subsample=0.8` (`bagging_fraction`)
+is confirmed inactive in both the deployed and retrained models --
+MEASURED directly, not inferred from documentation or a binary string.**
+**Nothing changed here** -- flagged for a future, separately-discussed
+change with before/after accuracy numbers, per instruction.
+
+### Chosen candidate thresholds: full parity + val checks, and pre-registration (2026-09-21)
+
+**P3, full 234,000-row cal ONNX parity (MEASURED) -- the 50,000-row
+sample's "0 flips" did not hold at full scale:** `max_abs_err=3.571906e-02
+mean_abs_err=2.979517e-06`. 4 flips total, all within thousandths of
+their threshold: ALLOW (`0.4789517595186417`) 1 flip (benign row 78357,
+Python allows/ONNX alerts -- not safety-degrading); BLOCK@0.0005
+(`0.9811748406902472`) 1 flip (malicious row 145478, ONNX more
+aggressive); BLOCK@0.001 (`0.9575215714986189`) 2 flips (malicious rows
+111253/130382, one each direction). **Correction (2026-09-21):** an
+earlier draft of this note called the BLOCK@0.001 pair "symmetric, not a
+directional bias" -- that is an over-read from n=2; two events split one
+each way is not evidence of symmetry (or of its absence), and the phrase
+is retracted.
+Consistent with the already-documented, pre-existing float32 TreeEnsemble
+ONNX limitation this repo already accepted for network (commit `6e8d50c`:
+"3 flips / 213,217") -- not a new problem from this retrain.
+
+**P4, val-only check at the chosen BLOCK threshold (MEASURED, 234,000 val
+rows):** `FPR=0.000615 (95% CI [0.000482,0.000775], 72/117001 FP)
+detection=0.9326 (95% CI [0.931155,0.934036], 109114/116999 TP)` at
+`0.9811748406902472` (target 0.0005). Falls inside the cal-derived CI at
+that target (`[0.000377,0.000642]`... actually the val point estimate
+0.000615 sits inside that interval), CIs overlap substantially. Not used
+to adjust anything.
+
+**P5 bagging test:** see the `bagging_freq` observation above -- MEASURED
+directly, `subsample=0.8` confirmed inactive.
+
+**DECISION (user-chosen, 2026-09-21):** ALLOW at cal target FPR 0.01 ->
+`0.4789517595186417`. BLOCK at cal target FPR 0.0005 ->
+`0.9811748406902472` (deviates from the 0.001 precedent -- see
+pre-registration rationale below). Full pre-registration document written
+to `~/cortex_static_retrain_run/PREREGISTRATION.txt` before test is ever
+read:
+
+```
+CORTEX-STATIC RETRAIN: PRE-REGISTRATION, BEFORE TEST IS EVER READ
+Timestamp: Mon Sep 21 10:04:18 AM UTC 2026
+
+============================================================
+1. CHOSEN THRESHOLDS AND TARGETS
+============================================================
+
+  ALLOW (allow_below): target cal FPR 0.01 -> 0.4789517595186417
+  BLOCK (block_at_or_above): target cal FPR 0.0005 -> 0.9811748406902472
+
+  Rationale for the 0.0005 BLOCK target (deviating from the deployed
+  model's 0.001 precedent): the deployed model's own recorded val-vs-test
+  behavior shows honest cal/val-derived FPRs understate FPR on the later
+  test split (see prediction arithmetic, section 3). A lower BLOCK target
+  is chosen in advance for this reason, not picked after seeing test.
+
+  Artifacts these thresholds belong to (sha256):
+    data/models/cortex_static_retrain.lgbm
+      acfa5a757aa13cd0708c00ca97f445ed86ab54d9a4e80505c7fd733157b02bea
+    data/models/cortex_static_retrain.meta
+      abef687e8ce6c7523918d85bbd0352bac5633502a1be9aadc1e45f2682b630bc
+    data/models/cortex_static_retrain.onnx
+      636c77c5c536bf3ba2996205206c718d481708b39e7bb0007e4b3535874b4944
+
+============================================================
+2. ACCEPTANCE GATES FOR THE SINGLE TEST READ
+============================================================
+
+  (a) REGRESSION GATE (hard): test AUC on calibrated probabilities
+      >= 0.9980. Deployed model's recorded test AUC (EVAL_ALL_MODELS_
+      RESULTS.txt): 0.998841.
+
+  (b) No hard gate on FPR. Report FPR and detection at both chosen
+      thresholds (ALLOW and BLOCK) with 95% Clopper-Pearson CIs. This is
+      read-only reporting, not a pass/fail condition in itself.
+
+============================================================
+3. PREDICTIONS (INFERRED, crude one-model ratio, uncertain by
+   roughly +-30% -- shown BEFORE test is read)
+============================================================
+
+  Deployed model's own recorded numbers (EVAL_ALL_MODELS_RESULTS.txt,
+  MEASURED):
+    val  @ ALLOW boundary: FP=928,  n_benign=117001  -> FPR=0.007932
+    val  @ BLOCK boundary: FP=65,   n_benign=117001  -> FPR=0.000556
+    test @ ALLOW boundary: FP=2699, n_benign=269940  -> FPR=0.009999
+    test @ BLOCK boundary: FP=269,  n_benign=269940  -> FPR=0.000997
+
+  val-to-test FPR ratios (deployed model):
+    ALLOW: 0.009999 / 0.007932 = 1.2606
+    BLOCK: 0.000997 / 0.000556 = 1.7937
+
+  New (retrained) model's val FPRs at the chosen thresholds (Step D / P4,
+  MEASURED):
+    val @ ALLOW (0.4789517595186417):  FPR=0.010231 (1197/117001 FP)
+    val @ BLOCK (0.9811748406902472):  FPR=0.000615 (72/117001 FP)
+
+  Applying the deployed model's val-to-test ratios to the new model's val
+  FPRs (arithmetic, INFERRED prediction, not a measurement):
+    predicted test FPR @ ALLOW = 0.010231 * 1.2606 = 0.012897 (~1.29%)
+    predicted test FPR @ BLOCK = 0.000615 * 1.7937 = 0.001103 (~0.110%)
+
+  +-30% uncertainty band on those predictions:
+    ALLOW: [0.009028, 0.016766]
+    BLOCK: [0.000772, 0.001434]
+
+  This is a crude, one-model-family ratio applied to a different model's
+  val numbers -- not a statistically rigorous forecast. It exists so a
+  large, surprising deviation on the real test read is visible as a
+  deviation from a stated prior, not rationalized after the fact.
+
+============================================================
+4. RULES (binding for after the test read)
+============================================================
+
+  - No threshold or model change may be made in response to test results
+    OTHER THAN an explicit accept/rollback decision by the user.
+  - Test is never used to pick between candidate thresholds -- the
+    candidates were already chosen (section 1) before test is read.
+  - A large drift from the section-3 prediction is DOCUMENTED and
+    DISCUSSED, not tuned away by picking a different threshold from test.
+
+============================================================
+ADDENDUM 1 (appended Mon Sep 21 10:12:10 AM UTC 2026, before any test read)
+============================================================
+
+  - Gate (a) is replaced: test AUC on calibrated probabilities >= 0.9985.
+    Reason: expected test AUC is about 0.9988 (new val AUC 0.999283 minus
+    the deployed model's recorded val-to-test gap 0.999319 - 0.998841 =
+    0.000478). The original 0.9980 floor would tolerate roughly 70% more
+    AUC error (1-AUC from about 0.0012 to 0.0020) and was not a
+    meaningful regression gate.
+
+  - Outcome rule: AUC >= 0.9985 -> the candidate may be proposed for
+    promotion (the user decides). AUC < 0.9985 -> NOT promoted; results
+    documented and discussed.
+
+  - Uncertainty note: the +-30% band in section 3 is too narrow for
+    BLOCK. Poisson noise alone on the three FP counts involved (65, 269,
+    72) gives about +-36% at 95%, before any model-to-model difference;
+    for ALLOW (928, 2699, 1197) it is about +-9%. Read the BLOCK
+    prediction as 0.110% with a plausible range of about 0.07%-0.15%,
+    which straddles the 0.1% architecture bar. No hard FPR gate.
+
+  data/processed/ember2024_test.parquet stat (informational only, atime
+  may be unreliable under relatime):
+    access: 2026-09-21 03:49:43.673704976 +0000
+    modify: 2026-09-18 09:48:57.278474058 +0000
+```
+
+### The one authorized test read (2026-09-21, MEASURED)
+
+Run once, via a scratchpad driver (`~/cortex_static_retrain_run/` --
+not committed to the repo) that overrode `scripts.evaluate_all_models.
+STATIC_MODEL` and `inference.policy_engine.STATIC_ALLOW_MAX` /
+`STATIC_BLOCK_MIN` as module attributes at runtime -- no repo file was
+edited to do this. A rehearsal (same driver, `_load_ember_test`
+substituted with a val-returning function, `pyarrow`/`pandas` parquet
+readers wrapped to raise on any path ending in `ember2024_test.parquet`)
+was run first and confirmed the override took effect (printed header
+showed the candidate path and the exact DECISION thresholds) and that no
+attempt was made to open the test parquet. The real run then used the
+unmodified `_load_ember_test` -- full output, raw, in
+`~/cortex_static_retrain_run/eval_static_retrain_test.txt`
+(sha256 `fd8869fe3f59d738bc7b47c9f44fb94ca83f0adf7d1c5614d21b1ecc144c27ab`).
+The test parquet was opened exactly 1 time (counted via a wrapped
+`pyarrow.parquet.ParquetFile`, printed in the output). Peak RssAnon during
+the run: ~18.4 GiB (well under the shared-machine guard), wall time ~3
+minutes, `free -k` available memory checked immediately before launch
+(37.3 GiB available).
+
+Loaded split sizes matched the pre-registered expectation exactly (no
+STOP condition triggered): val n=234,000 (117,001 benign / 116,999
+malicious), test n=539,940 (269,940 benign / 270,000 malicious).
+
+**Test-split results (candidate model, DECISION thresholds
+ALLOW=`0.4789517595186417` BLOCK=`0.9811748406902472`):**
+
+  3-way confusion:
+  ```
+  true\pred    ALLOW   ALERT   BLOCK      n
+  benign      266666    3001     273  269940
+  malicious     4821   18162  247017  270000
+  ```
+  @ ALLOW boundary: FP=3274 FN=4821 TP=265179 TN=266666 | FPR=0.012129
+  (95% Clopper-Pearson CI [0.011719, 0.012549]) | R=0.9821
+  @ BLOCK boundary: FP=273 FN=22983 TP=247017 TN=269667 | FPR=0.001011
+  (95% CP CI [0.000895, 0.001139]) | R=0.9149
+  AUC-ROC (test, calibrated): **0.998778**
+
+**Vs. pre-registration (report only -- no interpretation applied to
+change thresholds or the model):**
+
+  | boundary | predicted FPR | band | measured FPR | CI | verdict |
+  |---|---|---|---|---|---|
+  | ALLOW | 0.012897 | [0.009028, 0.016766] | 0.012129 | [0.011719, 0.012549] | HIT |
+  | BLOCK | 0.001103 | [0.0007, 0.0015] | 0.001011 | [0.000895, 0.001139] | HIT |
+
+  AUC 0.998778 >= 0.9985 (ADDENDUM 1 amended gate): **PASS**.
+  AUC 0.998778 >= 0.9980 (original gate): **PASS**.
+  Both measured FPRs land inside their pre-registered bands -- no large
+  deviation to document per the pre-registration's own rule.
+
+**Side-by-side with the deployed model's recorded test numbers**
+(`EVAL_ALL_MODELS_RESULTS.txt` lines 46-54):
+
+  | metric | deployed | candidate |
+  |---|---|---|
+  | ALLOW FPR | 0.009999 [0.009627, 0.010381] | 0.012129 [0.011719, 0.012549] |
+  | ALLOW recall | 0.9803 | 0.9821 |
+  | BLOCK FPR | 0.000997 [0.000881, 0.001123] | 0.001011 [0.000895, 0.001139] |
+  | BLOCK recall | 0.9168 | 0.9149 |
+  | AUC | 0.998841 | 0.998778 |
+
+  **Correction (2026-09-21):** an earlier draft of this note attributed the
+  candidate's measurably higher ALLOW FPR mainly to the `ExportsInfo`
+  feature regeneration. That is at best a partial explanation. The larger
+  cause is a methodology difference: `config/thresholds.yaml`'s prior
+  static thresholds were derived by running `find_threshold_for_fpr()`
+  directly against the calibrated *test*-split probabilities (see
+  `config/thresholds.yaml`'s pre-2026-09-21 comment) -- which is why the
+  deployed model's recorded test FPRs (0.009999, 0.000997) equal their
+  0.01/0.001 targets almost exactly: that agreement is true by
+  construction, not an out-of-sample result. The candidate's thresholds
+  were derived honestly on `cal` and read against `test` exactly once, so
+  the candidate's test FPR was never going to reproduce its own target as
+  tightly -- some drift from the val-measured FPR (0.010231; the cal FPR
+  the threshold was actually derived from is 0.009995, 1168/116,862) is
+  the expected, correct behaviour of an honest derivation, not a symptom
+  of the retrain or the feature change. The `ExportsInfo` regeneration
+  being a real but secondary factor on top of that is **INFERRED, not
+  measured** -- no ablation isolating it from the derivation-methodology
+  difference above has been run.
+
+  BLOCK FPR is statistically indistinguishable between the two models
+  (overlapping CIs, FP=273 vs 269) -- and separately, the candidate's
+  BLOCK 95% CI ([0.000895, 0.001139]) contains the architecture doc's
+  0.001 (0.1%) bar, so BLOCK is **at** that bar on held-out data, not
+  demonstrably below it; this note previously risked being read as
+  "meets" or "is under" the bar, which the CI does not support. ALLOW FPR
+  is measurably higher for the candidate (non-overlapping CIs) -- a real
+  difference, explained above, not evidence of a bug. AUC is marginally
+  lower for the candidate (by 0.000063), well inside both gates. BLOCK
+  recall is ~0.2 points lower for the candidate; ALLOW recall is ~0.2
+  points higher -- neither is large relative to the derivation-methodology
+  and feature-regeneration differences above.
+
+**No threshold or model was changed in response to test results.**
+`config/thresholds.yaml`, `data/models/cortex_static.{lgbm,meta,onnx}`
+were not touched by this step. Final verification (immediately after the
+read, 2026-09-21): deployed artifact hashes unchanged and match the
+`~/cortex_static_backup_20260921/` backups exactly (`.lgbm`
+`277489bee1b9d0828a5ab117d3498cc5902684bcda6b8d10dc2c4098fef71b34`,
+`.meta` `0f668725f9e5768718fb2cb34f5a98da70a02f163c8b1fa4850dd00d6869bfce`,
+`.onnx` `a9ae8f485fd9019c5f9c392395c20d6072366ff08b4a9414ed98219a5482a857`);
+`git status` shows no repo file changed by this step other than this
+`OPEN_ITEMS.md` edit itself; full test suite still green, **165 passed,
+0 failed, 0 skipped**. The candidate model (`data/models/
+cortex_static_retrain.*`) was NOT promoted -- promotion is a separate,
+explicitly authorized action not taken here.
+
+### Promotion (2026-09-21, MEASURED)
+
+User accepted the candidate for deployment after the pre-registered
+outcome rule was met (ADDENDUM 1: test AUC >= 0.9985; measured 0.998778 --
+PASS), in a separately, explicitly authorized step following the test
+read recorded above.
+
+**What changed:** `data/models/cortex_static.{lgbm,meta,onnx}` overwritten
+with the candidate (`cp -p`, timestamp `Mon Sep 21 10:31:50 AM UTC 2026`);
+post-copy sha256 verified to equal the candidate's recorded hashes exactly
+(`.lgbm acfa5a757aa13cd0708c00ca97f445ed86ab54d9a4e80505c7fd733157b02bea`,
+`.meta abef687e8ce6c7523918d85bbd0352bac5633502a1be9aadc1e45f2682b630bc`,
+`.onnx 636c77c5c536bf3ba2996205206c718d481708b39e7bb0007e4b3535874b4944`).
+`config/thresholds.yaml`'s `static:` block updated to `allow_below
+0.4789517595186417` / `block_at_or_above 0.9811748406902472` plus a
+rewritten static.* comment (methodology, model/threshold pairing, test
+results, the corrected causal explanation above, and the BLOCK-cap note
+below) -- verified via `yaml.safe_load()` deep-compare against the
+pre-promotion backup copy that these were the **only 2 of 8 top-level
+threshold keys** that changed; the diff is recorded by the
+`config(thresholds)` commit of this work. Fresh-process assertions after
+the edit:
+`inference.policy_engine.STATIC_ALLOW_MAX ==
+0.4789517595186417`, `STATIC_BLOCK_MIN == 0.9811748406902472`,
+`LGBMModel.load("data/models/cortex_static").model_hash ==
+"acfa5a757aa13cd0"`, `num_trees() == 3000` -- all passed.
+
+**How to roll back:** `bash ~/cortex_static_backup_20260921/rollback.sh`
+(real mode, no `--dry-run`) restores `cortex_static.{lgbm,meta,onnx}` and
+`config/thresholds.yaml` from the pre-promotion backup and re-verifies
+their hashes; a `--dry-run` pass was re-confirmed immediately before this
+promotion (exit 0, no processes had the deployed files open per `lsof`).
+
+**Post-promotion smoke test (cal split only, 234,000 rows, test not
+reopened):** reused `scripts.train_static._load_cal` and
+`scripts.verify_onnx_parity._onnx_run`/`_report` by import, against the
+now-deployed `data/models/cortex_static{,.onnx}` paths -- did not call
+`check_static()`/`main()` from that module, which would have opened
+`ember2024_test.parquet`. Result: `max_abs_err=3.571906e-02
+mean_abs_err=2.979517e-06`, 1 flip at ALLOW, 1 flip at BLOCK -- matches
+the earlier full-scale cal parity check exactly, no regression from
+promotion. Cal 3-way confusion (deployed thresholds, Python path, n=234,000):
+benign 115694/1110/58 (ALLOW/ALERT/BLOCK), malicious 1328/6740/109070.
+
+**Full test suite after promotion:** `165 passed, 0 failed, 0 skipped` --
+unchanged from pre-promotion.
+
+**Optional real-world sanity check (Step G, read-only, non-gating):** 5
+local validation files named in `PROJECT_HISTORY_REPORT.md`
+(`svchost.exe`, `notepad_test.exe`, `benign_test_50mb.exe`,
+`notepadd.exe`, `extractor.exe`) found on this machine. Features extracted
+once per file via the exact call `inference/pipeline.py` uses
+(`features.pe_features.PEFeatureExtractor().feature_vector_with_report(
+bytez)`, static parsing only, no file executed), then scored with both the
+OLD model (`~/cortex_static_backup_20260921/cortex_static`) and the NEW
+deployed model on the identical feature vector:
+
+  | file | sha256[:16] | old score | new score | old verdict | new verdict |
+  |---|---|---|---|---|---|
+  | svchost.exe | 75772da68f23bee2 | 0.877460 | 0.942081 | ALERT | ALERT |
+  | notepad_test.exe | ab15a95de88ab062 | 0.005642 | 0.023364 | ALLOW | ALLOW |
+  | benign_test_50mb.exe | fce08e3382e46073 | 0.980467 | 0.984642 | BLOCK | BLOCK |
+  | notepadd.exe | d38ba15bd8df9bdd | 0.935731 | 0.960786 | ALERT | ALERT |
+  | extractor.exe | 71506a193d361743 | 0.989866 | 0.993514 | BLOCK | BLOCK |
+
+  All 5 files are documented as **benign** at `PROJECT_HISTORY_REPORT.md:
+  218-222` (svchost.exe: benign, signed MS; notepad_test.exe: benign;
+  benign_test_50mb.exe: benign; notepadd.exe: benign; extractor.exe:
+  benign, PyInstaller). Two of them -- `benign_test_50mb.exe` (new score
+  0.984642) and `extractor.exe` (new score 0.993514) -- score at or above
+  the new BLOCK threshold (`0.9811748406902472`); both were also at or
+  above the OLD BLOCK threshold (`0.9798998555119341`) before this
+  retrain. All 5 verdicts are identical old vs. new model (no verdict
+  changed); no degraded feature groups on any file. All five scores rose:
+  svchost.exe +0.0646, notepad_test.exe +0.0177, benign_test_50mb.exe
+  +0.0042, notepadd.exe +0.0251, extractor.exe +0.0036. The cause of that
+  uniform increase was **not investigated** in this step -- **INFERRED**:
+  a combination of a different booster and a different calibrator, not
+  verified by any ablation isolating one from the other. Five files carry
+  no statistical weight -- report only, nothing acted on. This retrain
+  does not address the known real-world false-positive / feature-fidelity
+  problem (open item 7, `pe_features.py`-vs-thrember skew) that these two
+  BLOCK-scoring benign files are consistent with -- which is exactly why
+  the static BLOCK cap (item 2's interim corroboration gate) stays in
+  place, unchanged by this promotion.
+
+**Stale documentation references -- current state (updated across several
+follow-up sessions; as of this commit):**
+
+  **Fixed:** `ARCHITECTURE.md`'s threshold table (both its 3-line
+  ALLOW/ALERT/BLOCK band and its split-protection table's Static row are
+  updated to the current values and the train/val/cal carve).
+  `EVAL_ALL_MODELS_RESULTS.txt` received a one-line SUPERSEDED note
+  directly above its static section -- the section's own numbers are
+  untouched (see the paragraph below for why). `inference/policy_engine.py`'s
+  static-threshold comment is updated (comment lines only; no code
+  changed -- see this record's "Promotion" addenda).
+
+  **Still stale, NOT edited this session (out of this session's allowed
+  scope):** `README.md` (as of this commit: line 110 still shows
+  `--test data/processed/ember2024_test.parquet` in the `train_static`
+  example, and line 113 still names the removed `_split_xy` function --
+  the script has neither any more) and `PROJECT_HISTORY_REPORT.md` (as of
+  this commit: line 208 still quotes the pre-2026-09-08
+  pre-calibration-fix pair `0.6163460957`/`0.9950119117`) -- both files
+  currently hold **unrelated, uncommitted local edits by the maintainer**
+  (`git status --short` shows both `M`), so editing them here risked
+  colliding with in-progress work; `docs/Cortex_Pipeline_Report.html`
+  (lines 422-423, 531-532, 1301-1302, same pre-2026-09-08 pair) -- the
+  matching `docs/Cortex_Pipeline_Report.pdf` is **unverified**, because
+  `pdftotext` is not installed on this machine and `strings` cannot see
+  compressed PDF text streams. A ready patch for the README
+  `train_static` example (and the `_split_xy` sentence) is at
+  `~/cortex_static_followups/README_static_train.patch`, built and
+  dry-run-verified against both HEAD's and the current working-tree
+  README in a follow-up session; it is NOT applied to the repo.
+
+**`EVAL_ALL_MODELS_RESULTS.txt`'s static section is now superseded**, not
+regenerated: its numbers are untouched; a one-line SUPERSEDED note was
+added above the static section (re-running `scripts/evaluate_all_models.py`
+against `--only static` would reopen `ember2024_test.parquet`, spending
+the one authorized test read a second time -- that is why the numbers
+themselves were left alone). The current, authoritative
+static test numbers live in
+`reports/static_retrain_20260921/eval_static_retrain_test.txt` and this
+file's "The one authorized test read" section above.
+
+**Static BLOCK verdicts remain capped to ALERT** by the interim
+corroboration-gated policy (`inference/policy_engine.py::decide()`, item 2)
+-- unchanged by this promotion.
+
+**Durable record:** `reports/static_retrain_20260921/` (new, committed in
+the `docs(OPEN_ITEMS)` commit of this work) holds `PREREGISTRATION.txt`,
+`eval_static_retrain_test.txt`, `threshold_report_v2.txt`,
+`retrain_sha256.txt`, `MANIFEST.sha256` (sha256 of the four preceding
+files), and `DELIVERY_MANIFEST.txt` (artifact hashes/sizes, full-precision
+thresholds and their pairing, the ONNX input/output contract read live
+from `onnxruntime`, verdict semantics, and the known ONNX-vs-Python
+behaviour -- for the agent/endpoint integration team).
+
+**Commits:** the code for this work landed as two local commits:
+`8192452` (static split-discipline retrain + memory-lifecycle fix +
+regression test) and `48f55f0` (derive-thresholds tool + its tests).
+Worktree tests against the COMMITTED content (not working-tree overlays)
+measured **157** passed after `8192452` and **162** passed after
+`48f55f0`. The `config(thresholds)` and `docs(OPEN_ITEMS)` commits follow
+this edit. To undo the whole series before any push:
+`git reset --mixed 388d6df` (leaves the working tree exactly as it is,
+just unstages/uncommits; nothing here was ever pushed).
+
+**Note on this section's provenance:** this file's static-retrain
+material (the "retrain cluster" section starting above and running
+through this Promotion record) also contains one note written in an
+earlier, separate 2026-09-18 session and left uncommitted when this
+session's static-retrain work began -- the bold-labelled paragraph
+`**What "frozen val/test" means for static, recorded before the static
+session touches anything (2026-09-18):**` (not a `###` heading; no
+`###`-level heading in this section carries that date). It predates and
+is unrelated to the split-discipline retrain itself but was already
+sitting in this same working-tree file.
+
+### Session bookkeeping (not part of the promotion record)
+
+**Baseline test count for this session (2026-09-18): 159 passed, 0 failed,
+0 skipped** — re-verified at the start of this session, not carried
+forward from an earlier note. A task brief for this session stated an
+expected baseline of "157 passed"; that number does not appear anywhere in
+this file's git history and was traced to a stale, never-re-verified
+estimate rather than a real prior measurement. The actual figures at each
+point since the "155 (post-B1+B2) passed" line above (verified true at
+commit `ac132d2` by checking it out into an isolated worktree with real
+model/parquet artifacts present): +1 at `4f45630` (one new test,
+`test_behavioral_trace_without_model_is_visible_but_neutral`), unchanged
+at `388d6df` (docs/requirements only) → 156 from committed code, +3 from
+`tests/test_behavioral_model.py` (untracked, pre-existing separate
+work-in-progress, not part of any commit) → **159** observed today.
+Going forward in this repo, an "N passed" figure anywhere in this file is
+an **informational snapshot of when it was written, not a hard assertion
+to match** — the real gate at any point is 0 failed / 0 errors when
+actually run, not agreement with a previously-recorded digit, since the
+suite's size legitimately changes commit to commit.
+
 ### The defects
 
 - **Item 2 — calibration optimism.** The Platt calibrator for static,
@@ -228,7 +1158,8 @@ permutation** of the group list. Insert a `cal` phase between `test` and
 `train`: with the seed unchanged, val and test receive the same leading
 groups they get today (**byte-identical**), and `cal` is a deterministic
 slice of what would have been train. `scripts/train_static.py` has no split
-script — `_load_train_val_split` does the same with `rng.permutation(n_rows)`
+script — `_load_train_val_split` (since renamed to `_load_train_val`) does
+the same with `rng.permutation(n_rows)`
 and slicing; `perm[:n_val]` stays val, `perm[n_val:n_val+n_cal]` becomes
 `cal`, the remainder is train.
 

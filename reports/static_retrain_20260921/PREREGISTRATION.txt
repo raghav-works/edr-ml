@@ -1,0 +1,108 @@
+CORTEX-STATIC RETRAIN: PRE-REGISTRATION, BEFORE TEST IS EVER READ
+Timestamp: Mon Sep 21 10:04:18 AM UTC 2026
+
+============================================================
+1. CHOSEN THRESHOLDS AND TARGETS
+============================================================
+
+  ALLOW (allow_below): target cal FPR 0.01 -> 0.4789517595186417
+  BLOCK (block_at_or_above): target cal FPR 0.0005 -> 0.9811748406902472
+
+  Rationale for the 0.0005 BLOCK target (deviating from the deployed
+  model's 0.001 precedent): the deployed model's own recorded val-vs-test
+  behavior shows honest cal/val-derived FPRs understate FPR on the later
+  test split (see prediction arithmetic, section 3). A lower BLOCK target
+  is chosen in advance for this reason, not picked after seeing test.
+
+  Artifacts these thresholds belong to (sha256):
+    data/models/cortex_static_retrain.lgbm
+      acfa5a757aa13cd0708c00ca97f445ed86ab54d9a4e80505c7fd733157b02bea
+    data/models/cortex_static_retrain.meta
+      abef687e8ce6c7523918d85bbd0352bac5633502a1be9aadc1e45f2682b630bc
+    data/models/cortex_static_retrain.onnx
+      636c77c5c536bf3ba2996205206c718d481708b39e7bb0007e4b3535874b4944
+
+============================================================
+2. ACCEPTANCE GATES FOR THE SINGLE TEST READ
+============================================================
+
+  (a) REGRESSION GATE (hard): test AUC on calibrated probabilities
+      >= 0.9980. Deployed model's recorded test AUC (EVAL_ALL_MODELS_
+      RESULTS.txt): 0.998841.
+
+  (b) No hard gate on FPR. Report FPR and detection at both chosen
+      thresholds (ALLOW and BLOCK) with 95% Clopper-Pearson CIs. This is
+      read-only reporting, not a pass/fail condition in itself.
+
+============================================================
+3. PREDICTIONS (INFERRED, crude one-model ratio, uncertain by
+   roughly +-30% -- shown BEFORE test is read)
+============================================================
+
+  Deployed model's own recorded numbers (EVAL_ALL_MODELS_RESULTS.txt,
+  MEASURED):
+    val  @ ALLOW boundary: FP=928,  n_benign=117001  -> FPR=0.007932
+    val  @ BLOCK boundary: FP=65,   n_benign=117001  -> FPR=0.000556
+    test @ ALLOW boundary: FP=2699, n_benign=269940  -> FPR=0.009999
+    test @ BLOCK boundary: FP=269,  n_benign=269940  -> FPR=0.000997
+
+  val-to-test FPR ratios (deployed model):
+    ALLOW: 0.009999 / 0.007932 = 1.2606
+    BLOCK: 0.000997 / 0.000556 = 1.7937
+
+  New (retrained) model's val FPRs at the chosen thresholds (Step D / P4,
+  MEASURED):
+    val @ ALLOW (0.4789517595186417):  FPR=0.010231 (1197/117001 FP)
+    val @ BLOCK (0.9811748406902472):  FPR=0.000615 (72/117001 FP)
+
+  Applying the deployed model's val-to-test ratios to the new model's val
+  FPRs (arithmetic, INFERRED prediction, not a measurement):
+    predicted test FPR @ ALLOW = 0.010231 * 1.2606 = 0.012897 (~1.29%)
+    predicted test FPR @ BLOCK = 0.000615 * 1.7937 = 0.001103 (~0.110%)
+
+  +-30% uncertainty band on those predictions:
+    ALLOW: [0.009028, 0.016766]
+    BLOCK: [0.000772, 0.001434]
+
+  This is a crude, one-model-family ratio applied to a different model's
+  val numbers -- not a statistically rigorous forecast. It exists so a
+  large, surprising deviation on the real test read is visible as a
+  deviation from a stated prior, not rationalized after the fact.
+
+============================================================
+4. RULES (binding for after the test read)
+============================================================
+
+  - No threshold or model change may be made in response to test results
+    OTHER THAN an explicit accept/rollback decision by the user.
+  - Test is never used to pick between candidate thresholds -- the
+    candidates were already chosen (section 1) before test is read.
+  - A large drift from the section-3 prediction is DOCUMENTED and
+    DISCUSSED, not tuned away by picking a different threshold from test.
+
+============================================================
+ADDENDUM 1 (appended Mon Sep 21 10:12:10 AM UTC 2026, before any test read)
+============================================================
+
+  - Gate (a) is replaced: test AUC on calibrated probabilities >= 0.9985.
+    Reason: expected test AUC is about 0.9988 (new val AUC 0.999283 minus
+    the deployed model's recorded val-to-test gap 0.999319 - 0.998841 =
+    0.000478). The original 0.9980 floor would tolerate roughly 70% more
+    AUC error (1-AUC from about 0.0012 to 0.0020) and was not a
+    meaningful regression gate.
+
+  - Outcome rule: AUC >= 0.9985 -> the candidate may be proposed for
+    promotion (the user decides). AUC < 0.9985 -> NOT promoted; results
+    documented and discussed.
+
+  - Uncertainty note: the +-30% band in section 3 is too narrow for
+    BLOCK. Poisson noise alone on the three FP counts involved (65, 269,
+    72) gives about +-36% at 95%, before any model-to-model difference;
+    for ALLOW (928, 2699, 1197) it is about +-9%. Read the BLOCK
+    prediction as 0.110% with a plausible range of about 0.07%-0.15%,
+    which straddles the 0.1% architecture bar. No hard FPR gate.
+
+  data/processed/ember2024_test.parquet stat (informational only, atime
+  may be unreliable under relatime):
+    access: 2026-09-21 03:49:43.673704976 +0000
+    modify: 2026-09-18 09:48:57.278474058 +0000

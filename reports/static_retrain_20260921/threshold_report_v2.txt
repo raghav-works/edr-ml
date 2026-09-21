@@ -1,0 +1,31 @@
+model=data/models/cortex_static_retrain num_iterations=3000 feature_count=2568 calibrator_present=True
+source=data/processed/ember2024_train.parquet n_rows_total=2340000 n_val=234000 n_cal_expected(pre -1-filter)=234000
+cal rows loaded (post -1-filter): 234000
+cal rows dropped as unlabeled (-1): 0
+cal benign=116862 malicious=117138
+distinct calibrated scores on cal: 233353 (of 234000 rows)
+cal benign: 32/116862 (0.0274%) scores > 0.99, 102433/116862 (87.6530%) scores < 0.01
+cal malicious: 106698/117138 (91.0874%) scores > 0.99, 107/117138 (0.0913%) scores < 0.01
+=== threshold sweep on CAL only (test untouched, val not read) ===
+target_fpr=0.0001 -> threshold=0.9977410260 actual_fpr=0.000094 (95% CI [0.000047, 0.000168], 11/116862 benign FP) detection_rate=0.8489 (95% CI [0.846849, 0.850960], 99440/117138 malicious TP) n_tied_at_threshold=1
+  full-precision threshold: 0.9977410259813835 (reproduces FP=11 TP=99440 exactly, verified not assumed)
+target_fpr=0.0005 -> threshold=0.9811748407 actual_fpr=0.000496 (95% CI [0.000377, 0.000642], 58/116862 benign FP) detection_rate=0.9311 (95% CI [0.929659, 0.932568], 109070/117138 malicious TP) n_tied_at_threshold=1
+  full-precision threshold: 0.9811748406902472 (reproduces FP=58 TP=109070 exactly, verified not assumed)
+  threshold jump from previous target: 0.0165661853
+target_fpr=0.0010 -> threshold=0.9575215715 actual_fpr=0.000993 (95% CI [0.000820, 0.001190], 116/116862 benign FP) detection_rate=0.9518 (95% CI [0.950593, 0.953054], 111496/117138 malicious TP) n_tied_at_threshold=1
+  full-precision threshold: 0.9575215714986189 (reproduces FP=116 TP=111496 exactly, verified not assumed)
+  threshold jump from previous target: 0.0236532692
+target_fpr=0.0050 -> threshold=0.7320628018 actual_fpr=0.004997 (95% CI [0.004601, 0.005418], 584/116862 benign FP) detection_rate=0.9816 (95% CI [0.980773, 0.982323], 114978/117138 malicious TP) n_tied_at_threshold=1
+  full-precision threshold: 0.7320628018088604 (reproduces FP=584 TP=114978 exactly, verified not assumed)
+  threshold jump from previous target: 0.2254587697  <-- CLIFF (drop > 0.1)
+target_fpr=0.0100 -> threshold=0.4789517595 actual_fpr=0.009995 (95% CI [0.009432, 0.010582], 1168/116862 benign FP) detection_rate=0.9887 (95% CI [0.988040, 0.989261], 115810/117138 malicious TP) n_tied_at_threshold=1
+  full-precision threshold: 0.4789517595186417 (reproduces FP=1168 TP=115810 exactly, verified not assumed)
+  threshold jump from previous target: 0.2531110423  <-- CLIFF (drop > 0.1)
+target_fpr=0.0200 -> threshold=0.2274420080 actual_fpr=0.019955 (95% CI [0.019161, 0.020773], 2332/116862 benign FP) detection_rate=0.9932 (95% CI [0.992726, 0.993675], 116343/117138 malicious TP) n_tied_at_threshold=1
+  full-precision threshold: 0.22744200804171985 (reproduces FP=2332 TP=116343 exactly, verified not assumed)
+  threshold jump from previous target: 0.2515097515  <-- CLIFF (drop > 0.1)
+thresholds non-increasing as target FPR grows: True
+=== INFO ONLY: 3-way confusion on cal, ALLOW@target=0.01 (0.4789517595) / BLOCK@target=0.001 (0.9575215715) ===
+  benign: ALLOW=115694 ALERT=1052 BLOCK=116 n=116862
+  malicious: ALLOW=1328 ALERT=4314 BLOCK=111496 n=117138
+This is a MENU, not a decision -- no threshold was chosen, config/thresholds.yaml was not touched, nothing was written under data/models/.

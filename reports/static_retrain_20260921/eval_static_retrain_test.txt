@@ -1,0 +1,65 @@
+BEFORE override: STATIC_MODEL='data/models/cortex_static' ALLOW_MAX=0.5471026402140103 BLOCK_MIN=0.9798998555119341
+AFTER override:  STATIC_MODEL='/home/tnids/cortex-ml/data/models/cortex_static_retrain' ALLOW_MAX=0.4789517595186417 BLOCK_MIN=0.9811748406902472
+EMBER_TRAIN(val source)='data/processed/ember2024_train.parquet'
+EMBER_TEST(test source)='data/processed/ember2024_test.parquet'
+>>> prevalence projection at malicious base rates: 1 in 1,000, 1 in 10,000, 1 in 100,000  (per-signal only; the
+>>> combined pipeline's ALERT/NEEDS_REVIEW/TERMINATE volume through decide() is
+>>> NOT modelled -- that needs a file-population model this repo does not have.
+==============================================================================
+1. CORTEX-STATIC  (/home/tnids/cortex-ml/data/models/cortex_static_retrain.lgbm)
+   STATIC_ALLOW_MAX = 0.4789517595186417
+   STATIC_BLOCK_MIN = 0.9811748406902472
+------------------------------------------------------------------------------
+ split=val  (source: data/processed/ember2024_train.parquet)
+   3-way confusion (rows = true label, cols = static verdict):
+     true\pred       ALLOW    ALERT    BLOCK          n
+     benign         115804     1125       72     117001
+     malicious        1291     6594   109114     116999
+   binary metrics:
+  @ ALLOW boundary (not-ALLOW=+) TN=115804 FP=1197 FN=1291 TP=115708 | P=0.9898 R=0.9890 F1=0.9894 FPR=0.0102 AUC=0.999283 | n=234000 (117001 benign / 116999 malicious)
+  @ BLOCK boundary (BLOCK=+)   TN=116929 FP=72 FN=7885 TP=109114 | P=0.9993 R=0.9326 F1=0.9648 FPR=0.0006 AUC=0.999283 | n=234000 (117001 benign / 116999 malicious)
+   AUC-ROC (threshold-independent): 0.999283
+   -- deployment-prevalence projection: @ ALLOW boundary (escalate=+) (deployed threshold held fixed) --
+      per-signal positive-verdict rate only; combined pipeline volume not modelled (see header)
+      measured on this split: FPR=0.0102  TPR=0.9890  (117001 benign / 116999 malicious rows)
+      prevalence         PPV   alert%     FP/10k    FP/100k     TP/10k    TP/100k
+      1 in 1,000      0.0882    1.12%       ~102     ~1,022       ~9.9      ~98.9
+      1 in 10,000     0.0096    1.03%       ~102     ~1,023       ~1.0       ~9.9
+      1 in 100,000    0.0010    1.02%       ~102     ~1,023       ~0.1       ~1.0
+   -- deployment-prevalence projection: @ BLOCK boundary (BLOCK=+) (deployed threshold held fixed) --
+      per-signal positive-verdict rate only; combined pipeline volume not modelled (see header)
+      measured on this split: FPR=0.0006  TPR=0.9326  (117001 benign / 116999 malicious rows)
+      prevalence         PPV   alert%     FP/10k    FP/100k     TP/10k    TP/100k
+      1 in 1,000      0.6027    0.15%         ~6        ~61       ~9.3      ~93.3
+      1 in 10,000     0.1316    0.07%         ~6        ~62       ~0.9       ~9.3
+      1 in 100,000    0.0149    0.06%         ~6        ~62       ~0.1       ~0.9
+------------------------------------------------------------------------------
+ split=test  (source: data/processed/ember2024_test.parquet)
+   3-way confusion (rows = true label, cols = static verdict):
+     true\pred       ALLOW    ALERT    BLOCK          n
+     benign         266666     3001      273     269940
+     malicious        4821    18162   247017     270000
+   binary metrics:
+  @ ALLOW boundary (not-ALLOW=+) TN=266666 FP=3274 FN=4821 TP=265179 | P=0.9878 R=0.9821 F1=0.9850 FPR=0.0121 AUC=0.998778 | n=539940 (269940 benign / 270000 malicious)
+  @ BLOCK boundary (BLOCK=+)   TN=269667 FP=273 FN=22983 TP=247017 | P=0.9989 R=0.9149 F1=0.9550 FPR=0.0010 AUC=0.998778 | n=539940 (269940 benign / 270000 malicious)
+   AUC-ROC (threshold-independent): 0.998778
+   -- deployment-prevalence projection: @ ALLOW boundary (escalate=+) (deployed threshold held fixed) --
+      per-signal positive-verdict rate only; combined pipeline volume not modelled (see header)
+      measured on this split: FPR=0.0121  TPR=0.9821  (269940 benign / 270000 malicious rows)
+      prevalence         PPV   alert%     FP/10k    FP/100k     TP/10k    TP/100k
+      1 in 1,000      0.0750    1.31%       ~121     ~1,212       ~9.8      ~98.2
+      1 in 10,000     0.0080    1.22%       ~121     ~1,213       ~1.0       ~9.8
+      1 in 100,000    0.0008    1.21%       ~121     ~1,213       ~0.1       ~1.0
+   -- deployment-prevalence projection: @ BLOCK boundary (BLOCK=+) (deployed threshold held fixed) --
+      per-signal positive-verdict rate only; combined pipeline volume not modelled (see header)
+      measured on this split: FPR=0.0010  TPR=0.9149  (269940 benign / 270000 malicious rows)
+      prevalence         PPV   alert%     FP/10k    FP/100k     TP/10k    TP/100k
+      1 in 1,000      0.4752    0.19%        ~10       ~101       ~9.1      ~91.5
+      1 in 10,000     0.0830    0.11%        ~10       ~101       ~0.9       ~9.1
+      1 in 100,000    0.0090    0.10%        ~10       ~101       ~0.1       ~0.9
+==============================================================================
+done. read-only run -- no model / threshold / parquet was written.
+
+test parquet opened 1 time(s) (expected: 1)
+val/train parquet opened 1 time(s)
+STEP E DONE -- no model/threshold/parquet was written by this driver
