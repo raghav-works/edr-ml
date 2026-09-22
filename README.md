@@ -220,6 +220,95 @@ set hides. It is a **per-signal** rate; the combined pipeline's
 additionally reports, read-only against each test ROC, the higher threshold
 (and the recall it costs) needed to reach that PPV.
 
+> **RESOLVED, 2026-09-22.** This specific problem is fixed. The Platt
+> calibrator was refit on raw booster margins instead of probability
+> (commit `6eed759`), Static's BLOCK verdict was interim-capped to ALERT
+> with corroboration-gated escalation to a real BLOCK only when a MALICIOUS
+> memory or network verdict corroborates it on the same scan (commits
+> `b11999f`, `ac132d2`), and Static was fully retrained this session with
+> proper split discipline — a dedicated cal split, thresholds derived on
+> cal via `find_threshold_for_fpr()` with exact Clopper–Pearson confidence
+> intervals, and a single pre-registered test read (commits `8192452`,
+> `438d936`; see `docs/PhantomCortex_Static_Retrain_Report.pdf` and
+> `reports/static_retrain_20260921/`). Static's BLOCK authority is **no
+> longer uncapped or autonomous** — the "should not be trusted" conclusion
+> below no longer describes the current system. The incident narrative and
+> root-cause math that follow are kept as an accurate historical record of
+> what was found and why.
+
+**Known limitation (Cortex-Static — calibration saturation; production-readiness DOWNGRADED, 2026-08-28):**
+A 57-file validation round showed calibrated static scores collapsing into
+two bands (benign ≈ 0.006, malicious ≈ 0.996) with almost nothing between,
+and a confirmed cross-over: `extractor.exe` (benign, calibrated 0.9956)
+outranked two confirmed-malicious AgentTesla samples sitting just above the
+BLOCK threshold. Investigated by comparing, per file, the raw LightGBM
+booster margin `M`, the booster probability `p = σ(M)`, and the deployed
+Platt-calibrated score `c` (the AgentTesla samples themselves are not on
+this machine; the mechanism was reproduced on the 5 cortex-endpoint
+validation files, four of which already pack into calibrated 0.984–0.996):
+
+| file | raw margin M | p = σ(M) | Platt(p) = c |
+|---|---:|---:|---:|
+| notepad_test.exe (benign) | −5.24 | 0.0053 | 0.0062 |
+| svchost.exe (benign, signed MS) | **+1.87** | **0.867** | **0.984** |
+| notepadd.exe (benign) | **+2.58** | **0.930** | **0.992** |
+| benign_test_50mb.exe (benign) | +3.81 | 0.978 | 0.995 |
+| extractor.exe (benign, PyInstaller) | +4.48 | 0.989 | 0.996 |
+
+Two stages compound; they separate by margin range:
+
+1. **The Platt calibrator is a near-step function.** It is a
+   `LogisticRegression` (`C = 1e10`, effectively unregularised) fitted on the
+   booster's *probability* output over the EMBER2024 validation set — not on
+   the raw margin, the textbook Platt input. Because the booster is
+   near-perfectly separated on EMBER val (AUC 0.9988), that fit learned
+   `coef_ = 10.66`, `intercept_ = −5.13`, i.e. `c = σ(10.66·p − 5.13)`.
+   Transfer: `p=0.6 → 0.78`, `p=0.7 → 0.91`, `p=0.8 → 0.97`, `p=0.9 → 0.989`.
+   It **evacuates calibrated 0.05–0.55** and **compresses everything with
+   `p > 0.97` into calibrated [0.995, 0.996]**, destroying rank resolution in
+   exactly the zone where real benign/malicious files interleave — a
+   0.6-unit raw-margin gap there collapses to ~0.0005 calibrated, which is
+   how a benign file outranks true malware.
+2. **The boundary-zone raw margins are moderate, and the feature-fidelity
+   gap inflates them.** `svchost.exe`'s raw margin is only **+1.87**
+   (`p = 0.87` — "leaning malicious but clearly uncertain", exactly what
+   should land in ALERT); the step-function calibrator turns that into
+   **0.984**. That +1.87 is itself inflated by the documented
+   `pe_features.py`-vs-thrember gap (see "Known gap: no feature-parity test"
+   below — `header +3.75` vs thrember `+3.36`, against a `+1.166` booster
+   bias); cortex-endpoint's thrember-based raw margin for the same file was
+   **−0.10**. The feature gap decides *whether* a real-world benign file has
+   a positive margin; the calibrator guarantees any positive-ish margin
+   becomes a near-1.0 score with no resolution.
+
+The deep-benign band (`≈ 0.006`) is genuine booster-stage saturation on
+large-negative-margin files and is **not** a defect. `extractor.exe` /
+`benign_test_50mb.exe` scoring high is primarily booster-stage (margins
++4.48 / +3.81 — the same PyInstaller / atypical-structure false-positive
+pattern documented for the malware-ml candidate and cortex-endpoint's own
+binary); the calibrator is a minor amplifier there. It is the **middle** of
+the distribution — files that should read ALERT — that the calibrator
+destroys.
+
+**Root cause:** a two-stage compounding failure. (a) `pe_features.py`
+produces vectors skewed toward "malicious" vs the training/thrember
+reference, so real-world benign files land at moderate-positive raw margins.
+(b) The Platt calibrator, fitted unregularised on an already-separable
+probability distribution, is a near-step function that maps any
+moderate-positive margin to a BLOCK-adjacent score and collapses rank order
+above `p ≈ 0.97`. Refitting the calibrator (on raw margins, regularised,
+ideally with boundary-zone examples) addresses (b); closing the feature gap
+addresses (a). **No threshold change fixes either** — it relocates the band,
+not the lost resolution.
+
+**Consequence:** Cortex-Static's autonomous BLOCK authority (the one uncapped
+verdict in `decide()`) **should not be trusted until both stages are fixed
+and the model is re-validated on a real-world, confirmed-label file set.**
+The calibrated score currently carries almost no information between "clearly
+benign" and "clearly malicious", and its rank order is unreliable in the
+BLOCK-adjacent zone — a benign file can, and in the 57-file round did,
+outrank confirmed malware.
+
 **Known limitation (behavioral threshold):** across the full val+test sweep,
 exactly one benign sample is misclassified at every threshold below ~0.922 --
 a MalbehavD-V1 sample whose trace includes networking-setup calls
@@ -900,10 +989,52 @@ inside each group was chosen independently — this is not a line-for-line
 port. Same for the model classes: architecture shape (1D-CNN stack +
 multi-head self-attention) follows the brief, layer-by-layer code is fresh.
 
+## Known gap: no feature-parity test for `pe_features.py`
+
+> **UPDATE, 2026-09-22 — partially resolved.** An MVP feature-parity test
+> now exists at `tests/test_static_feature_parity.py` (commit `c6ebe5c`),
+> covering the vector contract, determinism, the `ExportsInfo` count-slot
+> regression, and byte-identical adapter passthrough between the live-PE
+> and EMBER2024-record code paths. This is a real, passing test, not a
+> stub. It does **not** yet close this gap fully: the two hardest checks —
+> a real EMBER2024 record-schema check pulled from HuggingFace, and a
+> skew-quantification cross-check against the reference `thrember`
+> extractor — are still blocked by a dependency conflict (`thrember`
+> needs pre-0.9 `signify`; this repo pins `signify>=0.9,<0.10` for the
+> opposite reason). Treat this as a partial resolution, not a closed item.
+
+cortex-endpoint has `tests/test_static_feature_parity.py`, which checks live
+extraction against a pinned `thrember` reference on real PEs (a signed one
+included) and embeds `runtime_feature_parity_verified: true` in every scan.
+**cortex-ml has no equivalent.** Nothing compares `pe_features.py` output
+against a reference extractor, so a silent extraction regression degrades
+every live static score with no error.
+
+This already happened: `features/pe_features.py` imported
+`from signify.authenticode import SignedPEFile`, an API removed in the
+installed **signify 0.9.2** (now `AuthenticodeFile`). The `except ImportError`
+swallowed it, `_SIGNIFY_AVAILABLE` went `False`, and the 8-dim `authenticode`
+group returned all-zeros for every file at inference — a train/serve skew
+(EMBER2024's training vectors have real authenticode features). It was caught
+only by manually scanning the 5 cortex-endpoint validation files and noticing
+`svchost.exe` (a signed Microsoft binary) scored 0.99 where cortex-endpoint
+scored 0.47. The import is now ported forward to the 0.9.x API; a corrected
+5-file comparison and the residual `pe_features.py`-vs-thrember fidelity gap
+(cortex-ml's vector still skews toward "malicious") are documented in
+`PROJECT_HISTORY_REPORT.md`, STEP 3. Building the parity test is the top
+open item for the static path.
+
 ## Open items to confirm as you go
-1. Exact column names in the `joyce8/EMBER2024` parquet schema — adjust
+1. **Build a `pe_features.py` feature-parity test** (see "Known gap" above) —
+   compare live extraction against a reference (thrember) on real PEs
+   including a signed one; this is the top static-path correctness gap.
+2. Close the residual `pe_features.py`-vs-thrember fidelity gap surfaced by
+   the 5-file comparison — cortex-ml's vector skews toward "malicious"
+   (`header` pushes harder, benign-side groups softer, the hand-rolled
+   `authenticode` group carries less signal than thrember's).
+3. Exact column names in the `joyce8/EMBER2024` parquet schema — adjust
    `_split_xy` once you've downloaded and inspected a split.
-2. Source dataset for the behavioral `api_calls`/`label` table.
-3. `embed_dim` for the behavioral CNN is set to 128 by default in
+4. Source dataset for the behavioral `api_calls`/`label` table.
+5. `embed_dim` for the behavioral CNN is set to 128 by default in
    `scripts/train_behavioral.py` — drop to 64 there if you want the smaller
    variant.
