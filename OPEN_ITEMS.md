@@ -1643,3 +1643,7 @@ work does not touch or shortcut those criteria.
   0.01; network 0.6672636218 @ `target_fpr` 0.001). Static's section stays
   as-is until its retrain session.
 - `PROJECT_HISTORY_REPORT.md` — uncommitted edits pending.
+
+## Known-but-accepted limitations
+
+- **Behavioral sentinel-token dependence — INVESTIGATED, accepted 2026-09-22, no fix applied.** `data/download_behavioral.py`'s vocabulary-check docstring incorrectly claimed the Cuckoo sentinel tokens `__anomaly__`/`__exception__` were absent from MalbehavD-V1/Carpenter (corrected in that file); token-ablation on the held-out test split found aggregate model dependence on these tokens is low (not systemic shortcut-learning) but two individual test rows show real per-row dependence, including one live false positive. See README.md's "Known limitation (behavioral sentinel tokens)" section for the full investigation and numbers.

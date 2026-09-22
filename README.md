@@ -325,6 +325,47 @@ training data, or the architecture research's rule-based overlay for
 high-risk call combinations -- not blanket threshold tuning in response to a
 single hard example.
 
+**Known limitation (behavioral sentinel tokens):** the training corpus
+includes two Cuckoo Sandbox logging markers, "__anomaly__" and
+"__exception__" (not real Windows API calls), and both hold real ids in the
+deployed vocabulary (24 and 288 -- not filtered out, not mapped to
+`<UNK>`). They are present on malicious rows in Mal-API-2019 (as originally
+documented) but also, contrary to what `data/download_behavioral.py`
+previously claimed, on rows in the benign-containing sources: 429
+MalbehavD-V1 rows (78 benign-labeled) contain "__exception__", and 7
+Carpenter benign rows contain "__anomaly__" (see that script's corrected
+docstring). This raised a real question: has the model learned "sentinel
+token present -> malicious" as a dataset-identity shortcut rather than a
+genuine behavioral signal?
+
+Investigated via token-ablation on the held-out test split (n=917): every
+occurrence of either sentinel token was replaced with `<UNK>` and the
+frozen deployed checkpoint was re-scored, with no retraining and no
+vocabulary change. Aggregate metrics barely move -- test AUC 0.9945 ->
+0.9941 overall, 0.9978 -> 0.9969 on the 292 sentinel-containing rows alone
+-- and a naive "predict MALICIOUS iff a sentinel token is present" rule
+badly underperforms the real model on the full test set (36% recall vs the
+model's 99%). This is **not** systemic shortcut-learning across the
+dataset: if the model were mostly reading sentinel presence as its
+malicious signal, its recall profile would look far closer to that naive
+rule's, and it does not.
+
+Two individual rows are the exception to that aggregate picture, reported
+honestly rather than smoothed over: (a) one genuinely benign MalbehavD-V1
+test row is a live false positive today -- it scores 0.92 (MALICIOUS) with
+a single "__exception__" token present among 49 real calls, and ablating
+just that one token alone drops the score to 0.06 (BENIGN); (b) one
+malicious Mal-API-2019 test row's correct verdict is carried almost
+entirely by 97 repeated "__exception__" tokens filling most of its scored
+100-token window (a Cuckoo logging artifact -- the underlying trace is
+1,329 calls long, but only the first 100 are scored, and 97 of those 100
+are this one repeated token, not real API diversity); ablating the token
+there would flip it to a false negative. No fix was applied: the aggregate
+evidence does not support a vocabulary filter or a retrain over two rows
+out of 917, so this is documented as a known, narrow limitation -- the
+same posture already used above for the behavioral threshold's single
+persistent false positive -- rather than treated as an open defect.
+
 ## Cortex-Memory
 Third signal, added independently of static/behavioral: LightGBM binary
 classifier over 55 VolMemLyzer-derived memory-forensics features plus 7

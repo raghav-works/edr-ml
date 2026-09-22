@@ -42,9 +42,26 @@ not repeated at runtime):
     Mal-API-2019's 278 unique tokens, 269 (96.8%) match a MalbehavD-V1 token
     exactly once both are lowercased -- no missing Nt/Zw prefixes, no
     truncation, a clean casing-only difference. The 9 that don't match
-    (including sentinel tokens "__anomaly__" and "__exception__", Cuckoo
-    Sandbox markers for anomalous/exception events, not real API calls) are
-    genuinely absent from MalbehavD-V1, not casing artifacts.
+    include sentinel tokens "__anomaly__" and "__exception__" (Cuckoo
+    Sandbox markers for anomalous/exception events, not real API calls).
+
+    CORRECTED 2026-09-22 -- the original version of this docstring claimed
+    these two sentinel tokens were "genuinely absent from MalbehavD-V1, not
+    casing artifacts." That claim was factually wrong, not merely stale:
+    checked directly against data/processed/behavioral_dataset.parquet,
+    "__exception__" appears in 429 MalbehavD-V1 rows (78 benign-labeled,
+    351 malicious-labeled), and "__anomaly__" appears in 7 Carpenter
+    benign.json rows (all benign-labeled) -- confirmed by spot-checking a
+    benign MalbehavD-V1 row with "__exception__" embedded among genuine
+    Windows API call names, not a casing/matching artifact. Both sentinel
+    tokens are present on both malicious- and benign-labeled rows, across
+    more than one source. (The other 8 of the 9 non-matching tokens were
+    not re-checked; this correction is scoped to the two sentinel tokens
+    only.) See README.md's "Known limitation (behavioral sentinel tokens)"
+    section for the resulting dataset-shortcut investigation and its
+    outcome (no fix applied; aggregate dependence across the test split is
+    low, but two individual rows show real per-row dependence on a single
+    sentinel token).
   - Carpenter's benign.json uses the same canonical Windows API casing as
     MalbehavD-V1. Of its 212 unique tokens, 144 (67.9%) match the existing
     Mal-API-2019+MalbehavD-V1 vocabulary once lowercased (spot-checked
