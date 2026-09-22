@@ -17,9 +17,17 @@ fixtures: no training data, no network, no model.
                             group-dict produces the exact same vector as the
                             live process_raw_features path
 
+Real EMBER2024 record schema vs raw_features() output was checked, but not
+here: a one-off investigation (2026-09-22, 140 real records pulled from
+joyce8/EMBER2024, see OPEN_ITEMS.md's "Structural" section for the method
+and result) confirmed the adapter's key/shape assumptions hold against real
+HF records, with zero mismatches. It isn't an automated pytest in this file
+because that would require a live HuggingFace pull inside the test suite
+(network-dependent, slow, and a moving target if the upstream dataset
+changes) for a check whose answer isn't expected to change on its own --
+see OPEN_ITEMS.md for why a small hand-copied fixture wasn't added either.
+
 NOT covered here (tracked in OPEN_ITEMS.md):
-  - real EMBER2024 record schema vs raw_features() output (needs a small HF
-    record pull)
   - live-vs-thrember skew quantification (thrember needs pre-0.9 signify;
     this repo pins signify>=0.9 -- a separate venv is required)
 """

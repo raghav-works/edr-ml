@@ -148,15 +148,46 @@ here.
   (`tests/test_static_feature_parity.py`, item 7): vector contract,
   determinism, signed-binary authenticode, ExportsInfo count slot, and
   adapter-passthrough parity, on committed synthetic PE fixtures. Two
-  sub-items remain:
-  - **Real EMBER2024 record schema check.** The adapter assumes an
-    EMBER2024 record's group dicts (`record["general"]`,
+  sub-items were identified; one is now closed:
+  - **Real EMBER2024 record schema check — DONE, 2026-09-22, one-off
+    investigation (not an automated test — see below for why).** The
+    adapter assumes an EMBER2024 record's group dicts (`record["general"]`,
     `record["header"]["coff"]`, ...) have the exact keys/shape that
-    `pe_features.raw_features()` produces. The MVP only proves the adapter
-    faithfully processes a dict `raw_features` itself made. Verifying
-    against a *real* record needs a small (~100-record) pull from
-    `joyce8/EMBER2024` on HF — NOT a full parquet regeneration. Needed
-    before trusting the adapter beyond "faithful passthrough".
+    `pe_features.raw_features()` produces; the MVP above only proves the
+    adapter faithfully processes a dict `raw_features` itself made, not a
+    real HF record. Verified directly: pulled 140 real records from
+    `joyce8/EMBER2024` via the same `hf_hub_download` streaming method
+    `data/download_ember2024.py` uses (100 `Win32_test.zip`, 20
+    `Win64_test.zip`, 20 `Dot_Net_test.zip` — all three PE-container
+    formats the training pipeline actually consumes), saved outside the
+    repo tree, no parquet regeneration. Tested two independent ways: (1)
+    ran every record through `features.ember2024_adapter.record_to_vector()`
+    with the `cortex.features.pe` logger instrumented to catch
+    `PEFeatureExtractor.process_raw_features()`'s silent per-group
+    zero-fill-on-exception path (`pe_features.py:846–851`) — a naive
+    "does it crash?" check would miss this, since that path never raises,
+    it silently degrades; the instrumentation itself was verified working
+    by deliberately deleting a real key (`header.coff.timestamp`) from a
+    copy of one record and confirming the expected `KeyError` and
+    zero-fill warning fired; (2) an exhaustive key-set diff of every real
+    record's `general`, `strings`, `header.coff`, `header.optional`,
+    `header.dos`, `section`, `authenticode`, and `datadirectories[0]`/
+    `[i]` keys against exactly what `pe_features.py`'s corresponding
+    `process_raw_features()` reads. Result across all 140 records, all
+    three formats: 0 exceptions, 0 shape mismatches, 0 non-finite values,
+    0 zero-fill warnings, 0 missing keys. One harmless finding:
+    `header.optional` carries an extra real key, `base_of_data`, that the
+    code correctly never reads (dead-weight field, not a bug). This also
+    closes two narrower residual questions flagged in code comments: (a)
+    `pe_features.py`'s `ExportsInfo` TODO about whether EMBER2024's
+    `exports` field is really a list of symbol-name strings — confirmed
+    directly (5 non-empty real examples, all plain string lists); (b) the
+    `authenticode` group's field types on genuinely signed real records —
+    confirmed directly (5 signed examples, `num_certs>0`, all 8 fields
+    present with correct numeric types). **This does NOT close the other
+    sub-item below** (the `thrember` skew-quantification cross-check) —
+    that remains open and blocked by the signify version conflict; this
+    investigation did not touch it.
   - **`thrember` skew-quantification cross-check.** Compare the live
     `pe_features` vector against the gold-standard `thrember` extractor on
     real PEs, per group, to quantify the documented "skews toward
