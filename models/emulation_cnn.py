@@ -75,12 +75,21 @@ class MultiHeadSelfAttention(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.norm = nn.LayerNorm(embed_dim)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, key_padding_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """key_padding_mask: (batch, seq) bool, True at <PAD> positions.
+
+        Masked-out keys get -inf pre-softmax so no query attends to them.
+        Callers must guarantee every row has at least one unmasked key -- an
+        all-masked row would produce an all -inf softmax row and NaN.
+        """
         residual = x
         b, s, _ = x.shape
         qkv = self.qkv(x).reshape(b, s, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
         q, k, v = qkv.unbind(0)
-        attn = torch.softmax((q @ k.transpose(-2, -1)) / self.scale, dim=-1)
+        scores = (q @ k.transpose(-2, -1)) / self.scale
+        if key_padding_mask is not None:
+            scores = scores.masked_fill(key_padding_mask[:, None, None, :], float("-inf"))
+        attn = torch.softmax(scores, dim=-1)
         attn = self.dropout(attn)
         out = (attn @ v).transpose(1, 2).reshape(b, s, -1)
         out = self.dropout(self.out(out))
@@ -146,13 +155,22 @@ class CortexEmulationNet(nn.Module):
                         m.weight[m.padding_idx].fill_(0.0)
 
     def forward(self, token_ids: torch.Tensor) -> torch.Tensor:
-        """token_ids: (batch, 500) int64 -> logits (batch,)"""
+        """token_ids: (batch, 500) int64 -> logits (batch,)
+
+        <PAD> positions (id == pad_idx) are excluded from both the
+        attention step and the pooling step -- otherwise short traces get
+        their pooled representation diluted by positional-embedding-only
+        noise at every unused slot, the same dilution fixed for Behavioral
+        in models/behavioral_cnn.py (commit 76c3534).
+        """
+        pad_mask = token_ids.eq(self.embedding.padding_idx)  # (B, seq), True at <PAD>
         x = self.embedding(token_ids) + self.pos_embedding[:, : token_ids.size(1), :]
         x = x.permute(0, 2, 1)          # (B, embed_dim, seq)
         x = self.conv_stack(x)          # (B, 128, seq)
         x = x.permute(0, 2, 1)          # (B, seq, 128)
-        x = self.attention(x)
-        x = x.mean(dim=1)               # global average pool -> (B, 128)
+        x = self.attention(x, key_padding_mask=pad_mask)
+        real_mask = (~pad_mask).unsqueeze(-1).to(x.dtype)      # (B, seq, 1)
+        x = (x * real_mask).sum(dim=1) / real_mask.sum(dim=1).clamp(min=1.0)  # masked mean pool
         logits = self.classifier(x).squeeze(-1)  # (B,)
         return logits
 
