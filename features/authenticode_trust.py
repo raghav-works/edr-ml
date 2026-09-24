@@ -87,7 +87,7 @@ def verify_trusted_chain(bytez: bytes) -> AuthenticodeTrustResult:
     try:
         af = AuthenticodeFile.from_stream(io.BytesIO(bytez))
     except Exception:
-        logger.debug("authenticode trust check: file did not parse", exc_info=True)
+        logger.warning("authenticode trust check: file did not parse", exc_info=True)
         return AuthenticodeTrustResult(False, "parse_error")
 
     try:
@@ -100,5 +100,5 @@ def verify_trusted_chain(bytez: bytes) -> AuthenticodeTrustResult:
         logger.debug("authenticode trust check: chain untrusted (%s)", exc)
         return AuthenticodeTrustResult(False, "chain_untrusted")
     except Exception:
-        logger.debug("authenticode trust check: unexpected verification error", exc_info=True)
+        logger.warning("authenticode trust check: unexpected verification error", exc_info=True)
         return AuthenticodeTrustResult(False, "parse_error")

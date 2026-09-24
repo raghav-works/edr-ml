@@ -107,14 +107,20 @@ python -m data.download_ember2024 --split test  --out data/processed/ember2024_t
 ```bash
 python -m scripts.train_static \
   --train data/processed/ember2024_train.parquet \
-  --test  data/processed/ember2024_test.parquet \
   --out   data/models/cortex_static
 ```
-`scripts/train_static.py::_split_xy` assumes feature columns are named
-`feature_0..feature_2567` (or plain digit strings) and a `label` column with
-EMBER's convention (`0`=benign, `1`=malicious, `-1`=unlabeled, dropped
-automatically). Adjust column detection if the HF parquet schema differs —
-check `df.columns` after downloading before your first real run.
+The script has no `--test` flag: it carves `train`/`val`/`cal` out of the
+training parquet by a seeded permutation (`--val-frac` and `--cal-frac`,
+default 0.1 each), trains on `train`, early-stops on `val`, and fits the Platt
+calibrator on `cal` -- `test` is never read here, only by
+`scripts.evaluate_all_models`. Output is `<out>.lgbm` + `<out>.meta`.
+`scripts/train_static.py::_feature_columns` selects columns named
+`feature_0..feature_2567` (or plain digit strings) and raises unless exactly
+2,568 are found; `_load_train_val` / `_load_cal` stream the parquet row group
+by row group and read the `label` column (falling back to `y`) with EMBER's
+convention (`0`=benign, `1`=malicious, `-1`=unlabeled, dropped
+automatically). The regenerated `data/processed/ember2024_*.parquet` files
+match this schema (`feature_0..feature_2567`, `sha256`, `label`).
 
 **Behavioral:** needs a dataset with `api_calls` (list[str]) + `label`
 (0/1) columns — build this from whatever API-trace corpus you're pairing
@@ -1085,8 +1091,11 @@ open item for the static path.
    the 5-file comparison — cortex-ml's vector skews toward "malicious"
    (`header` pushes harder, benign-side groups softer, the hand-rolled
    `authenticode` group carries less signal than thrember's).
-3. Exact column names in the `joyce8/EMBER2024` parquet schema — adjust
-   `_split_xy` once you've downloaded and inspected a split.
+3. ~~Exact column names in the `joyce8/EMBER2024` parquet schema.~~
+   Confirmed: the regenerated parquet has `feature_0..feature_2567`,
+   `sha256`, and `label`, which `scripts/train_static.py::_feature_columns`
+   checks at load time (it raises unless exactly 2,568 feature columns are
+   found).
 4. Source dataset for the behavioral `api_calls`/`label` table.
 5. `embed_dim` for the behavioral CNN is set to 128 by default in
    `scripts/train_behavioral.py` — drop to 64 there if you want the smaller
