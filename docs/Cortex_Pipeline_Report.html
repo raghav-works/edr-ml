@@ -1,0 +1,1510 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Cortex Five-Signal Malware Detection Pipeline</title>
+<style>
+  @page {
+    size: A4;
+    margin: 20mm 18mm 20mm 18mm;
+    @bottom-right { content: "Page " counter(page) " of " counter(pages); font-size: 8pt; color: #8a8f98; }
+    @bottom-left  { content: "Cortex Pipeline Report — 2026-08-27"; font-size: 8pt; color: #8a8f98; }
+  }
+  @page :first { @bottom-right { content: ""; } @bottom-left { content: ""; } }
+
+  html { font-size: 10.5pt; }
+  body {
+    font-family: "Helvetica Neue", Helvetica, Arial, "Liberation Sans", sans-serif;
+    color: #1f2328;
+    line-height: 1.5;
+    margin: 0;
+  }
+  h1, h2, h3, h4 { font-weight: 700; color: #0b2545; line-height: 1.25; }
+  h2 { font-size: 17pt; margin: 0 0 4pt 0; padding-bottom: 4pt; border-bottom: 2.5pt solid #0b2545; }
+  h3 { font-size: 13pt; margin: 18pt 0 4pt 0; color: #13315c; }
+  h4 { font-size: 11pt; margin: 12pt 0 3pt 0; color: #13315c; }
+  p { margin: 5pt 0; }
+  ul, ol { margin: 5pt 0 5pt 0; padding-left: 18pt; }
+  li { margin: 2.5pt 0; }
+  code { font-family: "SF Mono", "Menlo", "Consolas", "Liberation Mono", monospace; font-size: 8.7pt; background: #f2f4f7; padding: 0.5pt 3pt; border-radius: 3px; }
+
+  .section { break-before: page; }
+  .section-num { font-size: 10pt; letter-spacing: 0.14em; text-transform: uppercase; color: #5b6472; font-weight: 700; margin-bottom: 2pt; }
+
+  /* Title page */
+  .title-page { height: 245mm; display: flex; flex-direction: column; justify-content: center; }
+  .title-page h1 { font-size: 30pt; margin: 0 0 6pt 0; }
+  .title-page .subtitle { font-size: 14pt; color: #13315c; font-weight: 400; margin-bottom: 26pt; }
+  .title-page .meta { font-size: 10pt; color: #3d444d; }
+  .title-page .meta div { margin: 3pt 0; }
+  .rule { height: 3pt; background: #0b2545; width: 90mm; margin: 14pt 0 22pt 0; }
+
+  /* Plain-language callout */
+  .plain {
+    background: #eef4ff;
+    border-left: 4pt solid #2f6feb;
+    padding: 8pt 12pt;
+    margin: 8pt 0 12pt 0;
+    border-radius: 0 4px 4px 0;
+  }
+  .plain .lbl { font-weight: 700; color: #1a4fbf; font-size: 9pt; letter-spacing: 0.08em; text-transform: uppercase; display: block; margin-bottom: 2pt; }
+  .plain p { margin: 4pt 0; }
+
+  .tech { margin-top: 6pt; }
+  .tech .lbl { font-weight: 700; color: #5b6472; font-size: 9pt; letter-spacing: 0.08em; text-transform: uppercase; display: block; margin: 10pt 0 3pt 0; }
+
+  /* Callouts for risk / caution */
+  .note { background: #f6f8fa; border: 1pt solid #d0d7de; border-radius: 4px; padding: 7pt 11pt; margin: 8pt 0; }
+  .caution { background: #fff8e6; border-left: 4pt solid #d4a017; border-radius: 0 4px 4px 0; padding: 7pt 11pt; margin: 8pt 0; }
+  .caution .lbl { font-weight: 700; color: #9a6b00; font-size: 9pt; letter-spacing: 0.06em; text-transform: uppercase; display: block; margin-bottom: 2pt; }
+
+  table { border-collapse: collapse; width: 100%; margin: 8pt 0; font-size: 8.9pt; }
+  th, td { border: 1pt solid #d0d7de; padding: 4pt 6pt; text-align: left; vertical-align: top; }
+  th { background: #0b2545; color: #fff; font-weight: 600; }
+  tbody tr:nth-child(even) { background: #f6f8fa; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+
+  .tier-auto { color: #1a7f37; font-weight: 700; }
+  .tier-alert { color: #9a6b00; font-weight: 700; }
+  .tier-report { color: #6e7781; font-weight: 700; }
+
+  figure { margin: 12pt 0; text-align: center; break-inside: avoid; }
+  figure svg { max-width: 100%; height: auto; }
+  figcaption { font-size: 8.5pt; color: #5b6472; margin-top: 5pt; font-style: italic; }
+
+  .toc ol { list-style: none; padding-left: 0; }
+  .toc li { margin: 5pt 0; font-size: 10.5pt; }
+  .toc .n { display: inline-block; width: 22pt; color: #5b6472; font-weight: 700; }
+
+  .kv { font-size: 9pt; }
+  .kv b { color: #13315c; }
+  .small { font-size: 8.7pt; color: #444c56; }
+  .keeptight p { margin: 3pt 0; }
+</style>
+</head>
+<body>
+
+<!-- ==================== TITLE PAGE ==================== -->
+<div class="title-page">
+  <div class="section-num">Technical &amp; Executive Report</div>
+  <h1>Cortex</h1>
+  <div class="subtitle">The Five-Signal Malware Detection Pipeline<br>Architecture, Evidence, Limitations, and Roadmap</div>
+  <div class="rule"></div>
+  <div class="meta">
+    <div><b>Prepared:</b> 2026-08-27</div>
+    <div><b>System:</b> <code>cortex-ml</code> — independent clean reproduction, five detection signals</div>
+    <div><b>Sources:</b> repository <code>PROJECT_HISTORY_REPORT.md</code>, <code>README.md</code>, and source at
+      commit <code>9331159</code> plus the later uncommitted <code>signify</code> fix &amp; documentation updates</div>
+    <div><b>Audience:</b> mixed — every major section opens with a plain-language summary, followed immediately by full technical depth</div>
+  </div>
+  <div style="margin-top: 30pt;" class="small">
+    All figures in this document are taken directly from the repository's own records and code. No number has been
+    invented and no documented limitation has been softened.
+  </div>
+</div>
+
+<!-- ==================== TOC ==================== -->
+<div class="section">
+  <div class="section-num">Contents</div>
+  <h2>Table of Contents</h2>
+  <div class="toc">
+    <ol>
+      <li><span class="n">1</span> Executive Summary</li>
+      <li><span class="n">2</span> System Architecture — What Happens When a File Comes In</li>
+      <li><span class="n">3</span> Per-Signal Deep Dive
+        <div class="small" style="margin-left:22pt;">3.1 Static &nbsp;·&nbsp; 3.2 Behavioral &nbsp;·&nbsp; 3.3 Memory &nbsp;·&nbsp; 3.4 Network &nbsp;·&nbsp; 3.5 Emulation</div>
+      </li>
+      <li><span class="n">4</span> Policy Engine / Decision Logic</li>
+      <li><span class="n">5</span> Known Limitations and Risk Mitigations</li>
+      <li><span class="n">6</span> Engineering Discipline</li>
+      <li><span class="n">7</span> Current Status and Next Steps</li>
+      <li><span class="n">8</span> Appendix — Full Metrics, Thresholds, Splits, Config</li>
+    </ol>
+  </div>
+</div>
+
+<!-- ==================== 1. EXECUTIVE SUMMARY ==================== -->
+<div class="section">
+  <div class="section-num">Section 1</div>
+  <h2>Executive Summary</h2>
+
+  <div class="plain">
+    <span class="lbl">In plain terms</span>
+    <p><b>Cortex is a Windows malware detector that looks at a suspicious program in five independent ways</b> instead
+    of relying on a single test. Each of the five "signals" examines a different kind of evidence: the file's structure
+    on disk, the sequence of system actions it performs, what it looks like in a computer's memory, the network traffic
+    it generates, and how it behaves inside a safe emulator. The five results are then combined by a
+    <b>rule-based policy engine</b> that follows a strict priority order — it never averages scores together.</p>
+    <p>Why five and not one? Because every single detection method has a blind spot. A file that is disguised on disk
+    may still act maliciously once running. Fileless malware never writes a file to disk at all, so only the memory
+    signal can see it. Slow, quiet intrusions hide from network analysis but show up in system-call behavior. Using
+    five overlapping signals means one signal's weakness is covered by another's strength.</p>
+    <p><b>Headline results:</b> the two most-trusted signals (Static and Behavioral) score AUC 0.997–0.999 across three
+    separate implementations and have been checked against real malware and real signed Microsoft tools. Two newer
+    signals (Memory and Network) are fully trained with strong lab metrics but are deliberately held back from the most
+    severe automated actions until they are validated on real-world data. The fifth signal (Emulation) is trained but
+    kept out of decisions entirely because testing exposed a serious accuracy collapse over time.</p>
+  </div>
+
+  <figure>
+    <!-- Architecture overview diagram -->
+    <svg viewBox="0 0 720 430" xmlns="http://www.w3.org/2000/svg" font-family="Helvetica, Arial, sans-serif">
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="#5b6472"/>
+        </marker>
+        <marker id="arrgrey" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="#9aa0a6"/>
+        </marker>
+      </defs>
+
+      <text x="10" y="18" font-size="12" font-weight="700" fill="#0b2545">Five independent signals</text>
+
+      <!-- signal boxes -->
+      <g font-size="10.5">
+        <rect x="10" y="34" width="196" height="44" rx="6" fill="#e7f4ec" stroke="#1a7f37" stroke-width="1.6"/>
+        <text x="20" y="52" font-weight="700" fill="#0b2545">1 · Static</text>
+        <text x="20" y="68" fill="#3d444d" font-size="9">PE file structure on disk</text>
+
+        <rect x="10" y="90" width="196" height="44" rx="6" fill="#e7f4ec" stroke="#1a7f37" stroke-width="1.6"/>
+        <text x="20" y="108" font-weight="700" fill="#0b2545">2 · Behavioral</text>
+        <text x="20" y="124" fill="#3d444d" font-size="9">Runtime API-call sequence</text>
+
+        <rect x="10" y="146" width="196" height="44" rx="6" fill="#fff4d9" stroke="#d4a017" stroke-width="1.6"/>
+        <text x="20" y="164" font-weight="700" fill="#0b2545">3 · Memory</text>
+        <text x="20" y="180" fill="#3d444d" font-size="9">Memory-forensics features</text>
+
+        <rect x="10" y="202" width="196" height="44" rx="6" fill="#fff4d9" stroke="#d4a017" stroke-width="1.6"/>
+        <text x="20" y="220" font-weight="700" fill="#0b2545">4 · Network</text>
+        <text x="20" y="236" fill="#3d444d" font-size="9">Network-flow statistics</text>
+
+        <rect x="10" y="258" width="196" height="44" rx="6" fill="#f0f1f2" stroke="#9aa0a6" stroke-width="1.6" stroke-dasharray="5 3"/>
+        <text x="20" y="276" font-weight="700" fill="#0b2545">5 · Emulation</text>
+        <text x="20" y="292" fill="#3d444d" font-size="9">Speakeasy emulator trace</text>
+      </g>
+
+      <!-- arrows into policy engine -->
+      <g stroke="#5b6472" stroke-width="1.4" fill="none">
+        <path d="M206,56 C270,56 280,150 330,168" marker-end="url(#arr)"/>
+        <path d="M206,112 C270,112 285,165 330,182" marker-end="url(#arr)"/>
+        <path d="M206,168 L330,196" marker-end="url(#arr)"/>
+        <path d="M206,224 C270,224 285,215 330,210" marker-end="url(#arr)"/>
+      </g>
+      <!-- emulation dashed to telemetry only -->
+      <path d="M206,280 C280,280 300,330 356,338" stroke="#9aa0a6" stroke-width="1.4" fill="none" stroke-dasharray="5 3" marker-end="url(#arrgrey)"/>
+
+      <!-- policy engine -->
+      <rect x="332" y="150" width="200" height="72" rx="8" fill="#0b2545"/>
+      <text x="432" y="180" text-anchor="middle" font-size="12" font-weight="700" fill="#ffffff">Policy Engine</text>
+      <text x="432" y="198" text-anchor="middle" font-size="8.5" fill="#c7d3e6">strict priority rules</text>
+      <text x="432" y="211" text-anchor="middle" font-size="8.5" fill="#c7d3e6">scores never blended</text>
+
+      <!-- telemetry log -->
+      <rect x="356" y="322" width="176" height="34" rx="6" fill="#f0f1f2" stroke="#9aa0a6" stroke-width="1.4" stroke-dasharray="5 3"/>
+      <text x="444" y="343" text-anchor="middle" font-size="9" fill="#5b6472">Telemetry log only (not in decision)</text>
+
+      <!-- arrow to decision -->
+      <path d="M532,186 L600,186" stroke="#5b6472" stroke-width="1.4" fill="none" marker-end="url(#arr)"/>
+
+      <!-- final decision -->
+      <g font-size="10">
+        <rect x="600" y="120" width="110" height="132" rx="8" fill="#ffffff" stroke="#0b2545" stroke-width="1.6"/>
+        <text x="655" y="140" text-anchor="middle" font-weight="700" fill="#0b2545" font-size="10">Final decision</text>
+        <text x="612" y="162" fill="#1a7f37" font-weight="700">ALLOW</text>
+        <text x="612" y="182" fill="#9a6b00" font-weight="700">ALERT</text>
+        <text x="612" y="202" fill="#b3261e" font-weight="700">BLOCK</text>
+        <text x="612" y="222" fill="#b3261e" font-weight="700">TERMINATE</text>
+        <text x="612" y="242" fill="#5b6472" font-size="8">(one verdict only)</text>
+      </g>
+
+      <!-- legend -->
+      <g font-size="8.5">
+        <rect x="10" y="360" width="14" height="10" rx="2" fill="#e7f4ec" stroke="#1a7f37"/>
+        <text x="30" y="369" fill="#3d444d">Autonomous authority (BLOCK / TERMINATE)</text>
+        <rect x="10" y="378" width="14" height="10" rx="2" fill="#fff4d9" stroke="#d4a017"/>
+        <text x="30" y="387" fill="#3d444d">Independent signal, authority capped at ALERT</text>
+        <rect x="10" y="396" width="14" height="10" rx="2" fill="#f0f1f2" stroke="#9aa0a6" stroke-dasharray="4 2"/>
+        <text x="30" y="405" fill="#3d444d">Report-only / additive — never routed into the decision</text>
+      </g>
+    </svg>
+    <figcaption>High-level architecture. Five signals feed a rule-priority policy engine that emits exactly one verdict.
+    Static and Behavioral can act autonomously; Memory and Network are capped at ALERT; Emulation is logged but never
+    decides.</figcaption>
+  </figure>
+
+  <div class="tech">
+    <span class="lbl">Technical detail</span>
+    <p><b>What Cortex is.</b> <code>cortex-ml</code> is a from-scratch, independently engineered reproduction of a
+    malware-detection architecture previously proven across two earlier repositories (<code>malware-ml</code>, the
+    research phase, and <code>cortex-endpoint</code>, a packaged Windows executable). The prior work hit AUC &gt; 0.998
+    static and AUC &gt; 0.99 behavioral and passed real-world validation against live malware samples and signed system
+    tools. <code>cortex-ml</code> reproduces that detection logic in a footprint small enough to hand to another team,
+    began with two signals (Static, Behavioral), and has since been extended to five.</p>
+
+    <p><b>Why five independent signals.</b> The architecture contract (<code>Architecture.txt</code>) specifies
+    <i>sequential gating with no ensembling</i>: signals are combined by fixed-priority verdict rules, never by
+    averaging scores. Each signal exists because it sees a threat class the others structurally cannot:</p>
+    <ul>
+      <li><b>Static</b> — catches known-bad file structure before anything executes, but is blind to a clean-looking file that turns malicious at runtime.</li>
+      <li><b>Behavioral</b> — catches malicious runtime API-call patterns, but needs an execution trace to exist.</li>
+      <li><b>Memory</b> — catches injected code and fileless malware that never write a file to disk, so there is nothing for Static to score.</li>
+      <li><b>Network</b> — catches malicious traffic patterns (DDoS, brute force, botnet C2) from flow statistics alone.</li>
+      <li><b>Emulation</b> — catches malicious behavior inside a Speakeasy emulator before the sample ever runs on a real host.</li>
+    </ul>
+
+    <p><b>Headline results (held-out test sets, current trained models).</b></p>
+    <table>
+      <thead><tr><th>Signal</th><th>Key metric</th><th class="num">Value</th><th>Authority</th></tr></thead>
+      <tbody>
+        <tr><td>Static</td><td>AUC-ROC / detection rate / FPR @ 0.5</td><td class="num">0.9988 / 98.17% / 1.10%</td><td class="tier-auto">BLOCK (autonomous)</td></tr>
+        <tr><td>Behavioral</td><td>Accuracy / precision / recall / AUC-ROC</td><td class="num">98.36% / 100% / 98.08% / 0.9973</td><td class="tier-auto">TERMINATE (autonomous)</td></tr>
+        <tr><td>Memory</td><td>AUC-ROC / precision / recall / FPR</td><td class="num">1.0 / 0.9891 / 1.0 / 1.13%</td><td class="tier-alert">ALERT (capped)</td></tr>
+        <tr><td>Network</td><td>AUC-ROC / precision / recall / FPR</td><td class="num">0.9972 / 0.9969 / 0.9752 / 0.098%</td><td class="tier-alert">ALERT (capped)</td></tr>
+        <tr><td>Emulation</td><td>Test AUC-ROC / pooled detection @ 1% FPR</td><td class="num">0.8737 / ~49.9%</td><td class="tier-report">Report-only</td></tr>
+      </tbody>
+    </table>
+
+    <span class="lbl">What is fully trusted vs. still being validated — one honest paragraph</span>
+    <p>Static (BLOCK) and Behavioral (TERMINATE) carry full autonomous authority: both are validated across three
+    independent implementations with consistently strong AUCs, and Static passed real-world checks against actual
+    malware and signed Microsoft tools. Memory and Network are real, fully-trained, ONNX-exported signals with
+    excellent held-out metrics, but each is <b>deliberately capped at ALERT</b> for its own specific, diagnosed reason
+    — Memory because its benign training data all comes from a single baseline virtual machine (22 of 62 features
+    separate the classes almost perfectly, which looks more like "recognising that one VM" than "recognising
+    malice"); Network because it detects only 10.75% of slow "Infiltration" attacks and because models that look
+    near-perfect on its training dataset are documented to collapse toward random on real traffic. Emulation is
+    trained but held <b>report-only</b>: an ablation confirmed its malware recall falls from ~71% to ~42% between the
+    January and April 2022 collection eras and that shrinking the model does not fix it, and it beats a trivial
+    lookup-table baseline by only ~3–4 percentage points. Separately, a recently found static feature-extraction bug
+    (a broken optional <code>signify</code> import that silently zeroed one feature group) has been partially fixed,
+    but the residual feature-fidelity gap versus the reference extractor and the absence of an automated parity test
+    remain the top open correctness item for the static path.</p>
+  </div>
+</div>
+
+<!-- ==================== 2. SYSTEM ARCHITECTURE ==================== -->
+<div class="section">
+  <div class="section-num">Section 2</div>
+  <h2>System Architecture — What Happens When a File Comes In</h2>
+
+  <div class="plain">
+    <span class="lbl">In plain terms</span>
+    <p>When a file arrives, Cortex runs a fixed sequence of checks. First it makes sure the file is real, readable, not
+    too large, and actually a Windows program. Then it converts the file into a long list of numeric measurements and
+    asks the Static model for a verdict: <b>allow</b>, <b>alert</b>, or <b>block</b>. A <b>block</b> is final and
+    everything stops. An <b>allow</b> or <b>alert</b> lets the file move on to the Behavioral model, if a record of the
+    program's actions is available.</p>
+    <p>The Memory check is different: it runs <b>on its own, in parallel</b>, and is not made to wait behind the file
+    checks. That is deliberate — fileless malware never creates a file on disk, so if Memory had to wait for a valid
+    file to be found, it would never get to examine exactly the threat it exists to catch. The Network check is defined
+    in the decision rules but is <b>not yet connected</b> into the scan pipeline itself; this report says so plainly
+    rather than implying it is live. Finally, every result is passed to the policy engine, which applies its priority
+    rules and produces one final decision plus a structured JSON event record.</p>
+  </div>
+
+  <figure>
+    <svg viewBox="0 0 720 620" xmlns="http://www.w3.org/2000/svg" font-family="Helvetica, Arial, sans-serif">
+      <defs>
+        <marker id="a2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="#5b6472"/>
+        </marker>
+        <marker id="a2g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="#9aa0a6"/>
+        </marker>
+      </defs>
+
+      <!-- main vertical spine -->
+      <g font-size="10">
+        <rect x="250" y="14"  width="220" height="34" rx="6" fill="#0b2545"/>
+        <text x="360" y="35" text-anchor="middle" fill="#fff" font-weight="700">File arrives — scan(file_path, …)</text>
+
+        <rect x="250" y="66" width="220" height="40" rx="6" fill="#eef2f7" stroke="#0b2545" stroke-width="1.3"/>
+        <text x="360" y="82" text-anchor="middle" font-weight="700" fill="#0b2545">1 · Path validation</text>
+        <text x="360" y="97" text-anchor="middle" font-size="8" fill="#3d444d">exists · is file · readable · ≤ 100 MiB</text>
+
+        <rect x="250" y="124" width="220" height="40" rx="6" fill="#eef2f7" stroke="#0b2545" stroke-width="1.3"/>
+        <text x="360" y="140" text-anchor="middle" font-weight="700" fill="#0b2545">2 · PE validation (rule-based)</text>
+        <text x="360" y="155" text-anchor="middle" font-size="8" fill="#3d444d">valid Windows PE? — not an ML step</text>
+
+        <rect x="250" y="182" width="220" height="40" rx="6" fill="#eef2f7" stroke="#0b2545" stroke-width="1.3"/>
+        <text x="360" y="198" text-anchor="middle" font-weight="700" fill="#0b2545">3 · SHA-256 + feature extraction</text>
+        <text x="360" y="213" text-anchor="middle" font-size="8" fill="#3d444d">2568-dim EMBER2024-compatible vector</text>
+
+        <rect x="250" y="240" width="220" height="44" rx="6" fill="#e7f4ec" stroke="#1a7f37" stroke-width="1.6"/>
+        <text x="360" y="258" text-anchor="middle" font-weight="700" fill="#0b2545">4 · Static LightGBM</text>
+        <text x="360" y="273" text-anchor="middle" font-size="8" fill="#3d444d">score → ALLOW / ALERT / BLOCK</text>
+
+        <!-- gate -->
+        <polygon points="360,300 460,338 360,376 260,338" fill="#fff4d9" stroke="#d4a017" stroke-width="1.6"/>
+        <text x="360" y="334" text-anchor="middle" font-weight="700" font-size="9" fill="#0b2545">5 · Gate</text>
+        <text x="360" y="348" text-anchor="middle" font-size="7.5" fill="#3d444d">ALLOW/ALERT + API JSON?</text>
+
+        <rect x="250" y="392" width="220" height="44" rx="6" fill="#e7f4ec" stroke="#1a7f37" stroke-width="1.6"/>
+        <text x="360" y="410" text-anchor="middle" font-weight="700" fill="#0b2545">6 · Behavioral 1D-CNN + Attention</text>
+        <text x="360" y="425" text-anchor="middle" font-size="8" fill="#3d444d">→ BENIGN / MALICIOUS / PENDING</text>
+
+        <rect x="250" y="470" width="220" height="48" rx="8" fill="#0b2545"/>
+        <text x="360" y="490" text-anchor="middle" fill="#fff" font-weight="700">8 · Policy Engine — decide()</text>
+        <text x="360" y="505" text-anchor="middle" font-size="8" fill="#c7d3e6">priority rules · scores never blended</text>
+
+        <rect x="250" y="540" width="220" height="40" rx="6" fill="#ffffff" stroke="#0b2545" stroke-width="1.6"/>
+        <text x="360" y="556" text-anchor="middle" font-weight="700" fill="#0b2545">9 · Final decision + JSON event</text>
+        <text x="360" y="571" text-anchor="middle" font-size="8" fill="#3d444d">ALLOW / ALERT / BLOCK / TERMINATE</text>
+      </g>
+
+      <!-- spine arrows -->
+      <g stroke="#5b6472" stroke-width="1.4" fill="none">
+        <line x1="360" y1="48" x2="360" y2="64" marker-end="url(#a2)"/>
+        <line x1="360" y1="106" x2="360" y2="122" marker-end="url(#a2)"/>
+        <line x1="360" y1="164" x2="360" y2="180" marker-end="url(#a2)"/>
+        <line x1="360" y1="222" x2="360" y2="238" marker-end="url(#a2)"/>
+        <line x1="360" y1="284" x2="360" y2="298" marker-end="url(#a2)"/>
+        <line x1="360" y1="376" x2="360" y2="390" marker-end="url(#a2)"/>
+        <line x1="360" y1="436" x2="360" y2="468" marker-end="url(#a2)"/>
+        <line x1="360" y1="518" x2="360" y2="538" marker-end="url(#a2)"/>
+      </g>
+
+      <!-- BLOCK short-circuit (right side) -->
+      <path d="M470,262 C560,262 560,486 470,490" stroke="#b3261e" stroke-width="1.5" fill="none" marker-end="url(#a2)"/>
+      <text x="566" y="360" font-size="8.5" fill="#b3261e" font-weight="700">BLOCK →</text>
+      <text x="566" y="372" font-size="8.5" fill="#b3261e">short-circuit,</text>
+      <text x="566" y="384" font-size="8.5" fill="#b3261e">always final</text>
+
+      <!-- fail path from validation -->
+      <path d="M250,86 C170,86 170,486 250,490" stroke="#9a6b00" stroke-width="1.3" fill="none" marker-end="url(#a2)"/>
+      <text x="70" y="270" font-size="8.5" fill="#9a6b00" font-weight="700">validation fail /</text>
+      <text x="70" y="282" font-size="8.5" fill="#9a6b00">scan error →</text>
+      <text x="70" y="294" font-size="8.5" fill="#9a6b00">fail-closed to ALERT</text>
+
+      <!-- Memory independent lane (left) -->
+      <g font-size="9">
+        <rect x="20" y="360" width="150" height="40" rx="6" fill="#fff4d9" stroke="#d4a017" stroke-width="1.6"/>
+        <text x="95" y="376" text-anchor="middle" font-weight="700" fill="#0b2545" font-size="9">7 · Memory LightGBM</text>
+        <text x="95" y="390" text-anchor="middle" font-size="7.5" fill="#3d444d">runs independently</text>
+      </g>
+      <text x="20" y="345" font-size="8" fill="#3d444d">memory features supplied →</text>
+      <path d="M170,382 C212,382 216,472 250,487" stroke="#d4a017" stroke-width="1.4" fill="none" marker-end="url(#a2)"/>
+      <text x="20" y="420" font-size="7.5" fill="#3d444d" >not gated behind static;</text>
+      <text x="20" y="431" font-size="7.5" fill="#3d444d">runs even if steps 1–4 fail</text>
+
+      <!-- Network not wired -->
+      <g font-size="9">
+        <rect x="500" y="536" width="200" height="46" rx="6" fill="#f0f1f2" stroke="#9aa0a6" stroke-width="1.4" stroke-dasharray="5 3"/>
+        <text x="600" y="553" text-anchor="middle" font-weight="700" font-size="8.5" fill="#5b6472">Network signal</text>
+        <text x="600" y="566" text-anchor="middle" font-size="7.5" fill="#5b6472">threshold + verdict fn exist in</text>
+        <text x="600" y="577" text-anchor="middle" font-size="7.5" fill="#5b6472">policy_engine; NOT wired into pipeline.py</text>
+      </g>
+      <path d="M500,560 L472,560" stroke="#9aa0a6" stroke-width="1.4" fill="none" stroke-dasharray="5 3" marker-end="url(#a2g)"/>
+    </svg>
+    <figcaption>The actual scan flow in <code>inference/pipeline.py</code>. Solid arrows are the main spine; the red
+    path is the unconditional BLOCK short-circuit; the amber lane is Memory running independently; the dashed box is
+    Network, defined in the policy engine but not yet called by the pipeline.</figcaption>
+  </figure>
+
+  <div class="tech">
+    <span class="lbl">Step-by-step walkthrough (<code>CortexPipeline.scan()</code>)</span>
+    <ol class="keeptight">
+      <li><b>Memory first, deliberately (step 7 in code order).</b> If a memory feature vector is supplied, Cortex-Memory
+      runs <i>before</i> any file validation and independently of it. This is intentional: a fileless / injected threat
+      has no on-disk file to resolve, so gating Memory behind path or PE validation would disable it for exactly the
+      threat class it exists to catch.</li>
+      <li><b>Path validation.</b> <code>_validate_path()</code> checks the path exists, is a regular file, is readable,
+      and is ≤ 100 MiB (<code>MAX_FILE_SIZE_BYTES</code>). On failure the static verdict becomes <code>ERROR</code>, a
+      reason code is recorded, and the policy engine is called immediately with whatever verdicts exist (Memory may
+      still have produced one).</li>
+      <li><b>Rule-based PE validation.</b> <code>feature_extractor.is_valid_pe(bytez)</code> — a structural check, not
+      an ML prediction. A non-PE or corrupt file yields <code>static_verdict = ERROR</code> and reason code
+      <code>invalid_or_non_pe_file</code>, then straight to the policy engine.</li>
+      <li><b>SHA-256 + feature extraction.</b> The file's SHA-256 is recorded and
+      <code>PEFeatureExtractor.feature_vector()</code> produces the 2568-dimensional EMBER2024-compatible vector (12
+      feature groups; see §3.1).</li>
+      <li><b>Static model.</b> <code>static_model.predict_proba()</code> returns a single Platt-calibrated malicious
+      probability. <code>static_verdict_from_score()</code> maps it: <code>&lt; 0.6163460957</code> → ALLOW;
+      <code>&lt; 0.9950119117</code> → ALERT; otherwise → BLOCK. Any exception here is caught and becomes
+      <code>static_verdict = ERROR</code> with reason <code>static_scan_exception</code> — it is never allowed to crash
+      the scan or silently pass.</li>
+      <li><b>Gate into Behavioral.</b> If <code>static_verdict == ALLOW</code> and an API-call JSON path was supplied,
+      Behavioral runs. If <code>static_verdict == ALERT</code> and API-call JSON was supplied, Behavioral
+      <i>also</i> runs (an ALERT can still be upgraded to TERMINATE by a MALICIOUS behavioral verdict). If
+      <code>static_verdict == BLOCK</code>, Behavioral is never run — the block is already protected and final. The
+      tokenizer returns <code>PENDING</code> for empty / insufficient traces rather than guessing.</li>
+      <li><b>Memory in parallel (already computed in step 1).</b> Its score and verdict sit alongside the static and
+      behavioral verdicts with no dependency between them.</li>
+      <li><b>Network — current wiring status, stated honestly.</b> <code>NETWORK_MALICIOUS_MIN</code>,
+      <code>NetworkVerdict</code>, and <code>network_verdict_from_score()</code> all exist in
+      <code>inference/policy_engine.py</code>, and <code>decide()</code> accepts a <code>network_verdict</code>
+      argument. But <code>CortexPipeline.scan()</code> has no network parameter and never computes or passes a network
+      verdict — the pipeline was never extended. Network is a trained, ONNX-exported model with a derived threshold; it
+      is simply not yet called end-to-end.</li>
+      <li><b>Policy engine.</b> <code>decide(static_verdict, behavioral_verdict, memory_verdict[, network_verdict])</code>
+      applies the priority chain in §4 and returns a <code>FinalDecision</code> plus reason codes.</li>
+      <li><b>Structured output.</b> <code>to_security_event()</code> wraps the result as a JSON envelope with a UTC
+      timestamp and a UUID correlation ID: per-signal <code>{score, verdict}</code> blocks, the final decision, and the
+      accumulated reason codes.</li>
+    </ol>
+
+    <span class="lbl">Why some signals gate on others and some do not</span>
+    <p><b>Static → Behavioral is gated</b> because Behavioral analysis exists to refine an <i>uncertain</i> static
+    result. A static BLOCK is already the most severe file-level verdict and is unconditionally final, so running
+    Behavioral after it would add cost and risk (a MALICIOUS→TERMINATE upgrade is possible but a BLOCK already stops
+    the file). An ALLOW or ALERT is where a second opinion has value, so the gate opens there.</p>
+    <p><b>Memory does not gate</b> because its target — injected code and fileless malware — by definition leaves no
+    valid on-disk PE for steps 1–4 to evaluate. If Memory waited behind static validation, a fileless intrusion that
+    fails PE validation (there is no PE) would never be examined. So Memory runs whenever memory features are supplied,
+    regardless of the static verdict and even when path/PE validation failed outright.</p>
+    <p><b>Network, once wired, is designed to be independent for the same reason:</b> network flows exist whether or not
+    a file was submitted for scanning, and the threats it targets (C2 beaconing, exfiltration, floods) are not tied to
+    a single on-disk artifact.</p>
+    <p><b>Fail-closed everywhere.</b> Every validation failure and every caught scan exception resolves to
+    <code>ERROR</code>, and <code>decide()</code> maps every <code>ERROR</code> to ALERT — never to a silent ALLOW.</p>
+  </div>
+</div>
+
+<!-- ==================== 3. PER-SIGNAL DEEP DIVE ==================== -->
+<div class="section">
+  <div class="section-num">Section 3</div>
+  <h2>Per-Signal Deep Dive</h2>
+  <p>Each subsection follows the same shape: a plain-language summary, then what the signal detects and why it is
+  separate, the real dataset and its provenance/licensing, the architecture chosen and <i>why</i> (including where it
+  deliberately diverged from a reference design and the evidence for that), how the threshold was derived, and the
+  current measured performance.</p>
+
+  <!-- 3.1 STATIC -->
+  <h3>3.1 &nbsp; Cortex-Static</h3>
+  <div class="plain">
+    <span class="lbl">In plain terms</span>
+    <p>Static analysis looks at a Windows program <b>without running it</b>. It measures thousands of structural
+    properties of the file — its headers, sections, imported functions, embedded strings, byte patterns, digital
+    signature — and a gradient-boosted decision-tree model decides how malicious that structure looks. This is the
+    fastest signal and the only one that can act with full authority: a Static <b>BLOCK</b> is always final. It is
+    trained on EMBER2024, a large public research dataset of labelled Windows programs.</p>
+  </div>
+  <div class="tech">
+    <span class="lbl">What it detects and why it is a separate signal</span>
+    <p>Malicious PE file structure — packers, anomalous headers, suspicious import tables, known-bad string/IOC
+    patterns, signature anomalies — detectable before any execution. It is the first line of defence and the only
+    signal with no execution-trace dependency, so it is the natural place for the highest-authority verdict.</p>
+
+    <span class="lbl">Dataset &amp; provenance</span>
+    <p><b>EMBER2024</b>, streamed from HuggingFace (<code>FutureComputing4AI/EMBER2024</code>-derived), <b>Apache-2.0</b>,
+    PE-format records only. <code>datasets.load_dataset()</code> hit an Arrow schema-inference crash on this dataset, so
+    <code>data/download_ember2024.py</code> streams the PE records directly from the HF zips and deduplicates on
+    <code>sha256</code> in bounded batches. The raw download contained every row twice (~50% duplicate rate, the
+    signature of "every sample present twice"): <b>4,680,000 raw train rows → 2,340,000 unique</b>; <b>1,080,000 raw
+    test rows → 539,940 unique</b>. <b>Leakage check:</b> zero train/test hash overlap after the dedup fix (a handful
+    of within-test-shard repeats noted, not train/test crossing).</p>
+
+    <span class="lbl">Architecture chosen, and why</span>
+    <p><b>LightGBM gradient-boosted trees</b> over the 2568-dim feature vector, with a Platt calibrator
+    (<code>LogisticRegression</code>) fitted on top of the raw booster. Hyperparameters:
+    <code>num_leaves=255</code>, <code>max_depth=15</code>, <code>learning_rate=0.03</code>,
+    <code>min_child_samples=50</code>, <code>is_unbalance=True</code>. Training used 2,996 boosting rounds, ~2.1h wall
+    time. Trees are the established architecture for EMBER-family tabular features and are unaffected by input scaling.</p>
+    <p><b>Divergence from the reference, and the evidence for it.</b> Two deliberate departures:</p>
+    <ul>
+      <li><b>Feature extractor rewritten for formula-fidelity, not copied.</b> <code>features/pe_features.py</code>
+      matches the real EMBER2024 / "thrember" reference extractor's <i>group budget</i> and formulas exactly (fixed
+      string-regex vocabulary, header categorical dictionaries, section stats, data-directory layout, hashing schemes)
+      — replacing an earlier version built from independently-guessed field semantics. The reason: a live PE-byte
+      vector and an EMBER2024 training record must be numerically column-compatible, or the model learns one semantics
+      at training time and is fed another at inference — a skew that does not show up in offline eval. Every field
+      inside each group was still chosen independently; this is a formula-compatible reimplementation, not a
+      line-for-line port.</li>
+      <li><b>Memory pressure solved with OS swap, not data subsampling.</b> Training on the full 2.34M-row / 2568-feature
+      split repeatedly OOM-killed a 38 GB machine. Fixes applied in order: a streaming train/val loader instead of a
+      full fancy-indexed DataFrame, <code>free_raw_data=True</code> + explicit <code>del</code>/<code>gc.collect()</code>,
+      reduced <code>n_jobs</code>, a capped <code>histogram_pool_size</code>, two-round <code>Dataset</code>
+      construction — and finally <b>adding swap space at the system level</b>. The earlier research repo, under the
+      same class of memory pressure, instead trained on a 51.3% subsample; a separate attempt there at sequential
+      chunked training was explicitly rejected after validation TPR degraded across chunks (0.917 → 0.171 → 0.174).
+      <code>cortex-ml</code> trained on 100% of the deduplicated data.</li>
+    </ul>
+
+    <span class="lbl">Threshold derivation</span>
+    <p><code>STATIC_ALLOW_MAX</code> and <code>STATIC_BLOCK_MIN</code> were re-derived from scratch against
+    <code>cortex-ml</code>'s own trained model — <code>models.static_lgbm.find_threshold_for_fpr()</code> run on the
+    <i>calibrated</i> probabilities over the 539,940-row deduplicated EMBER2024 test split, not carried over from the
+    prior project's placeholder values.</p>
+    <table>
+      <thead><tr><th>Boundary</th><th>Constant</th><th class="num">Value</th><th>Target FPR</th><th class="num">Actual FPR</th><th class="num">Detection @ boundary</th></tr></thead>
+      <tbody>
+        <tr><td>score &lt; this → ALLOW</td><td><code>STATIC_ALLOW_MAX</code></td><td class="num">0.6163460957</td><td>0.01</td><td class="num">0.009999</td><td class="num">0.9803</td></tr>
+        <tr><td>score ≥ this → BLOCK</td><td><code>STATIC_BLOCK_MIN</code></td><td class="num">0.9950119117</td><td>0.001</td><td class="num">0.000997</td><td class="num">0.9168</td></tr>
+      </tbody>
+    </table>
+    <p>The BLOCK boundary hits the architecture doc's max-FPR-at-0.1% bar. The ALLOW boundary uses target FPR 0.01
+    because the score distribution has a cliff between target FPR 0.005 and 0.01 (threshold drops from ~0.96 to ~0.62):
+    0.01 is where ALLOW stops sitting in near-BLOCK territory and meaningfully separates from ALERT. Scores between the
+    two boundaries → ALERT.</p>
+
+    <span class="lbl">Current performance</span>
+    <p>Held-out test (deduplicated EMBER2024 test split): <b>AUC-ROC 0.9988</b>, <b>detection rate 98.17%</b>,
+    <b>FPR 1.10%</b> at threshold 0.5 (a less conservative operating point than the deployed ALLOW/BLOCK boundaries).
+    <b>ONNX export:</b> <code>cortex_static.lgbm</code> (78.8 MB) → <code>cortex_static.onnx</code> (61.4 MB) with the
+    Platt calibrator merged into the same graph; verified against 10,000 real test rows — mean abs diff ≈ 0, max abs
+    diff 0.0032 (float noise), <b>zero verdict differences</b> at the production thresholds. No INT8 quantization (tree
+    ensembles are unaffected by weight quantization).</p>
+
+    <div class="caution">
+      <span class="lbl">Known limitation</span>
+      <p>A silent <code>signify</code> 0.9.2 import failure had zeroed the entire 8-dim <code>authenticode</code>
+      feature group at inference (see §5.4 and §6). It is now ported to the 0.9.x API, but a residual feature-fidelity
+      gap versus the thrember reference remains — <code>cortex-ml</code>'s vector is systematically shifted toward
+      "malicious" — and there is still <b>no automated feature-parity test</b>. The earlier research-repo candidate also
+      showed a PyInstaller-build-artifact false positive on a signed benign binary; this has not been re-tested against
+      <code>cortex-ml</code>'s own static model.</p>
+    </div>
+  </div>
+
+  <!-- 3.2 BEHAVIORAL -->
+  <h3>3.2 &nbsp; Cortex-Behavioral</h3>
+  <div class="plain">
+    <span class="lbl">In plain terms</span>
+    <p>Behavioral analysis looks at <b>what a program actually does</b> — the ordered list of Windows system functions
+    it calls while running. A neural network reads that sequence and decides whether the pattern of actions looks
+    malicious. This catches malware that is disguised well enough on disk to slip past Static but gives itself away
+    through its behavior. A Behavioral <b>MALICIOUS</b> verdict can autonomously trigger the most severe action,
+    <b>TERMINATE</b>.</p>
+  </div>
+  <div class="tech">
+    <span class="lbl">What it detects and why it is a separate signal</span>
+    <p>Malicious runtime intent expressed as an API-call sequence (e.g. injection, persistence, C2 setup, credential
+    access). It exists separately because a structurally clean file can still behave maliciously, and because a
+    sequence model captures ordering and context that static structural features cannot.</p>
+
+    <span class="lbl">Dataset &amp; provenance — three independently-verified sources</span>
+    <table>
+      <thead><tr><th>Source</th><th>Origin / licence context</th><th>Classes</th><th class="num">Rows</th></tr></thead>
+      <tbody>
+        <tr><td>Mal-API-2019</td><td>GitHub <code>ocatak/malware_api_class</code></td><td>malicious only</td><td class="num">7,107</td></tr>
+        <tr><td>MalbehavD-V1</td><td>GitHub <code>mpasco/MalbehavD-V1</code></td><td>both</td><td class="num">2,570</td></tr>
+        <tr><td>Carpenter <code>benign.json</code></td><td>Kaggle (benign-only subset used deliberately)</td><td>benign only</td><td class="num">101</td></tr>
+      </tbody>
+    </table>
+    <p>9,778 combined records before dedup. Carpenter's malicious batches are deliberately never downloaded, to avoid
+    unverified malicious labels. All API names are lowercased into one shared vocabulary space (&gt;96% clean
+    casing-only overlap between Mal-API-2019 / MalbehavD-V1; &gt;67% between Carpenter and the other two). Deduplication
+    is on record <code>id</code>, <b>not</b> on the <code>api_calls</code> sequence — MalbehavD-V1's shorter sequences
+    legitimately recur across genuinely different real files, so sequence-based dedup would have wrongly discarded
+    ~1,400 distinct samples.</p>
+    <p><b>Leakage check:</b> a naive row-independent split left <b>85 sequences spanning multiple splits</b>.
+    <code>scripts/split_behavioral.py</code> now does a grouped stratified 80/10/10 split by <code>(source, label)</code>
+    with every row sharing an identical <code>api_calls</code> sequence forced into the same split; verified 0 sequences
+    span more than one split after the fix (a hard invariant).</p>
+
+    <span class="lbl">Architecture chosen, and why</span>
+    <p><b>1D-CNN + multi-head self-attention</b>, single sigmoid score (<code>models/behavioral_cnn.py</code>):
+    token embedding + learned positional embedding → conv stack (channels 128→256→128→128, kernel sizes 3,5,7,3, each
+    with BatchNorm + dropout 0.3) → multi-head self-attention (4 heads, residual + LayerNorm) → global pool → linear
+    sigmoid head. Fixed sequence length 100, <code>&lt;PAD&gt;</code>/<code>&lt;UNK&gt;</code> tokens. Raw sigmoid output,
+    no calibration layer. <code>embed_dim</code> defaults to 128 in the training CLI (dropping to 64 is a documented
+    option). This follows the architecture brief's CNN + attention shape.</p>
+    <p><b>Divergence from the reference:</b> the earlier research-repo behavioral model (Model A, Oliveira-sourced) used
+    <i>embedding → 2×Conv1D → global max pool → sigmoid with no attention</i>. <code>cortex-ml</code> added the
+    self-attention block and moved to the three-source Mal-API-2019 + MalbehavD-V1 + Carpenter corpus. The evidence
+    that drove a more conservative overall approach is Model A's threshold-generalization failure (below).</p>
+
+    <span class="lbl">Threshold derivation</span>
+    <p><code>BEHAVIORAL_MALICIOUS_MIN = 0.60</code>. Derived by a threshold sweep (0.10–0.99) over the val+test splits
+    combined (1,835 rows, only 274 benign) — deliberately <b>not</b> <code>find_threshold_for_fpr()</code> at a
+    precise target, because 274 benign samples (~0.36% resolution each) cannot support a precise FPR claim. Exactly one
+    benign sample is a persistent false positive at every threshold below ~0.922 — a MalbehavD-V1 trace with
+    <code>setsockopt</code> / <code>ioctlsocket</code> / <code>wsastartup</code> / <code>getsockname</code> alongside
+    routine registry/system calls, plausibly confusable with C2 setup; the model scores it 0.921006, confidently wrong.
+    The threshold was <b>deliberately not raised</b> to clear this single case: <i>n</i>=1 is not a sound basis for a
+    permanent recall trade-off across the whole malicious population, and Behavioral has no rule-based backstop in this
+    repo yet. Malicious false-negative count on val+test climbs slowly as the threshold drops (57 at 0.95, 49 at 0.90,
+    ~38 at 0.60, 36 at 0.50).</p>
+
+    <span class="lbl">Current performance</span>
+    <p>Held-out test at threshold 0.60: <b>accuracy 98.36%</b>, <b>precision 100%</b>, <b>recall 98.08%</b>,
+    <b>AUC-ROC 0.9973</b>. 18 epochs, early-stopped, ~4 minutes wall time on CPU. <b>ONNX export:</b> two bugs found
+    and fixed — <code>torch.onnx.export()</code> defaulting to the dynamo exporter (needs <code>onnxscript</code>, not a
+    dependency; forced legacy <code>dynamo=False</code>), and <code>quantize_dynamic()</code> trying to quantize the
+    Conv1d stack (no <code>ConvInteger</code> CPU kernel; INT8 quantization restricted to <code>MatMul</code>/<code>Gemm</code>).</p>
+
+    <div class="caution">
+      <span class="lbl">Known limitation</span>
+      <p>The single hard benign false positive above; no rule-based overlay for high-risk call combinations independent
+      of the ML score (flagged as the targeted future fix, not blanket threshold tuning). And unlike the prior
+      research-repo model, <code>cortex-ml</code>'s behavioral threshold <b>has not yet been stress-tested</b> against a
+      genuinely held-out generalization check.</p>
+    </div>
+  </div>
+
+  <!-- 3.3 MEMORY -->
+  <h3>3.3 &nbsp; Cortex-Memory</h3>
+  <div class="plain">
+    <span class="lbl">In plain terms</span>
+    <p>Memory analysis examines a snapshot of a computer's RAM for the fingerprints of malicious activity — code
+    injected into another process, hidden modules, unusual handle or driver counts. Crucially, this works <b>even when
+    malware never writes a file to disk</b>. Because of that, the Memory check runs on its own and is not made to wait
+    for the file checks. Its metrics on the research dataset are near-perfect — which is itself a reason for caution, so
+    its authority is capped at <b>ALERT</b>.</p>
+  </div>
+  <div class="tech">
+    <span class="lbl">What it detects and why it is a separate signal</span>
+    <p>Injected / fileless malicious activity visible only in a memory image: process hollowing, injected regions
+    (<code>malfind</code>), hidden processes (<code>psxview</code>), anomalous handle/DLL/callback/driver statistics. It
+    is independent because there is often no on-disk file for any other signal to score.</p>
+
+    <span class="lbl">Dataset &amp; provenance</span>
+    <p><b>CIC-MalMem-2022</b> (Carrier et al., ICISSP 2022) — a public research dataset, no licensing ambiguity. The
+    official UNB/CIC portal requires a manual download form and, at pull time (2026-08-25), was missing 3 of the
+    dataset's 4 top-level categories; the working copy was taken from the Kaggle mirror
+    <code>luccagodoy/obfuscated-malware-memory-2022-cic</code>. 58,596 rows, 55 VolMemLyzer-derived numeric
+    memory-forensics features plus <code>Category</code> (family + <code>Benign</code>) and <code>Class</code>
+    (<code>Benign</code>/<code>Malware</code>). Schema validated <b>structurally against the real file</b> (column
+    count, dtypes, exact <code>Class</code> value set, first/last column identity), not trusted from documentation.</p>
+
+    <span class="lbl">Architecture chosen, and why</span>
+    <p><b>LightGBM + Platt calibration</b>, mirroring <code>models/static_lgbm.py</code>'s shape exactly. Inputs: the 55
+    raw VolMemLyzer columns plus <b>7 derived ratio/aggregate features</b> (62 total) — <code>callbacks_anonymous_ratio</code>,
+    <code>svcscan_driver_ratio</code>, <code>handles_file_ratio</code>, <code>handles_mutant_ratio</code>,
+    <code>psxview_hiding_score</code>, <code>ldrmodules_hidden_ratio</code>, <code>malfind_injection_rate</code> — each
+    tied to a specific memory-forensics indicator. Hyperparameters: <code>num_leaves=31</code>, <code>max_depth=-1</code>,
+    <code>learning_rate=0.05</code>, <code>min_child_samples=20</code>; <code>is_unbalance</code> deliberately omitted
+    (the split is near 50/50, unlike Static). Best iteration 71 (val-driven early stopping).</p>
+    <p><b>Divergence / deliberate design choices:</b> a <code>MemoryFeatureScaler</code> (train-only-fit standardisation)
+    is built and tested but <b>not applied</b> — tree-ensemble splits are provably invariant to any monotonic
+    per-feature transform, so scaling every value would change zero split decisions while adding a second fitted
+    artifact to carry into the ONNX export. Handles-per-process and DLL-per-process ratios were deliberately <b>not</b>
+    added as derived features because VolMemLyzer already provides them directly. The scaler stays available for a
+    future non-tree Cortex-Memory variant.</p>
+
+    <span class="lbl">Threshold derivation</span>
+    <p><code>MEMORY_MALICIOUS_MIN = 0.0005358335957155212</code>, via
+    <code>models.memory_lgbm.find_threshold_for_fpr()</code> at <b>target FPR 0.01</b> against calibrated
+    val+test-combined probabilities (11,860 rows, <b>5,860 benign</b> — far more statistical power than Behavioral's
+    274; one false positive moves observed FPR by ~0.017%). Sweep:</p>
+    <table>
+      <thead><tr><th>Target FPR</th><th class="num">Threshold</th><th class="num">Actual FPR</th><th class="num">Benign FPs</th><th class="num">Detection</th></tr></thead>
+      <tbody>
+        <tr><td>0.10%</td><td class="num">0.100225</td><td class="num">0.085%</td><td class="num">5 / 5,860</td><td class="num">99.95%</td></tr>
+        <tr><td>0.50%</td><td class="num">0.000627</td><td class="num">0.478%</td><td class="num">28 / 5,860</td><td class="num">100.00%</td></tr>
+        <tr style="background:#eef4ff;"><td><b>1.00%</b></td><td class="num"><b>0.000536</b></td><td class="num"><b>0.939%</b></td><td class="num"><b>55 / 5,860</b></td><td class="num"><b>100.00%</b></td></tr>
+        <tr><td>2.00%</td><td class="num">0.000502</td><td class="num">1.724%</td><td class="num">101 / 5,860</td><td class="num">100.00%</td></tr>
+        <tr><td>5.00%</td><td class="num">0.000446</td><td class="num">4.744%</td><td class="num">278 / 5,860</td><td class="num">100.00%</td></tr>
+      </tbody>
+    </table>
+    <p>1% chosen: the best-supported target (55 observed FPs vs only 5 at 0.1%, too few to trust) that costs nothing in
+    recall — detection is already 100% at this and every looser target.</p>
+
+    <span class="lbl">Current performance</span>
+    <p>Held-out test at this threshold: <b>AUC-ROC 1.0</b>, <b>precision 0.9891</b>, <b>recall 1.0</b>, <b>F1 0.9945</b>,
+    <b>FPR 1.13%</b> (33/2,930 benign test rows). <b>ONNX export:</b> verified against the real model and the actual
+    5,930-row test split — mean abs error 6.7e-9, max abs error 2.0e-6, <b>zero prediction mismatches</b> at the
+    operating threshold across all test rows.</p>
+
+    <div class="caution">
+      <span class="lbl">Known limitation — the reason for the ALERT cap</span>
+      <p><b>22 of the 62 features individually exceed 0.95 AUC</b>, confirmed on both the train split and the untouched
+      test split — e.g. <code>handles.avg_handles_per_proc</code> is a tight 208–318 band for benign (std 17.5) but
+      ranges 71–33,784 for malware; <code>dlllist.avg_dlls_per_proc</code> is 34.5–53.2 for benign but drops to 7.3 for
+      malware. This pervasive multi-feature separability on data the model never trained on rules out our own split
+      leaking and points at the dataset itself: <b>every CIC-MalMem-2022 benign sample is a repeated capture of "normal
+      user behavior" on a single baseline Windows 10 VM</b>, while malicious samples span far more varied executions.
+      The model may be learning "does this look like that one baseline VM" more than "is malicious behavior present."
+      This is a specific reason to <i>keep</i> the ALERT cap, not a generic hedge. Also unsolved: benign
+      <i>near</i>-duplicates (only exact duplicates are merged), because nothing in the schema identifies which benign
+      rows share a capture session.</p>
+    </div>
+  </div>
+
+  <!-- 3.4 NETWORK -->
+  <h3>3.4 &nbsp; Cortex-Network</h3>
+  <div class="plain">
+    <span class="lbl">In plain terms</span>
+    <p>Network analysis looks only at <b>statistics about network connections</b> — how long they last, how many
+    packets and bytes flow each way, timing between packets — never the packet contents. From those numbers a
+    decision-tree model flags traffic that matches attack patterns like denial-of-service, brute-force login attempts,
+    or botnet command-and-control. It is trained on a large public intrusion-detection dataset. It has a real blind spot
+    for slow, quiet intrusions, and near-perfect scores on this kind of dataset are known to collapse on real traffic —
+    so its authority is capped at <b>ALERT</b>. The model is trained and exported but <b>not yet wired into the scan
+    pipeline</b>.</p>
+  </div>
+  <div class="tech">
+    <span class="lbl">What it detects and why it is a separate signal</span>
+    <p>Malicious traffic patterns from CICFlowMeter flow-statistics: DDoS (HOIC/LOIC), brute force (FTP/SSH/web),
+    botnet, DoS (Hulk/GoldenEye/Slowloris/SlowHTTPTest). Independent of any scanned file — flows exist on their own.</p>
+
+    <span class="lbl">Dataset &amp; provenance</span>
+    <p><b>CSE-CIC-IDS2018</b> (Sharafaldin et al., CIC), <b>chosen over UNSW-NB15 specifically because UNSW-NB15 has a
+    documented licensing ambiguity</b> while CSE-CIC-IDS2018 has an explicit, clear redistribution licence. Hosted on
+    AWS Open Data (<code>s3://cse-cic-ids2018/</code>, <code>ca-central-1</code>) with no account or access form. Only
+    the <code>Processed Traffic Data for ML Algorithms/</code> prefix was synced (10 CICFlowMeter CSVs, 6.4 GiB) — not
+    the raw PCAPs. 16,233,002 raw rows across 10 capture days (Feb–Mar 2018).</p>
+
+    <span class="lbl">Architecture chosen, and why</span>
+    <p><b>LightGBM + Platt calibration</b>, mirroring Static/Memory exactly (split → calibrate → derive threshold from
+    our own data → ONNX export with calibration merged). One deliberate hyperparameter deviation from Memory's config:
+    <code>is_unbalance=True</code>, because Network's train split is 84.3% benign / 15.7% malicious (~5.4:1), unlike
+    Memory's near-50/50 — blindly copying Memory's omission would have reused a choice made for a different class
+    balance. <code>num_leaves=31</code>, <code>max_depth=-1</code>, <code>learning_rate=0.05</code>,
+    <code>min_child_samples=20</code>. 760 boosting iterations (early stop at 760/810), 54.2 s fit, peak RSS 2.8 GiB.</p>
+    <p><b>Divergence from the reference:</b> deliberately <b>not</b> the autoencoder + classifier hybrid some network
+    anomaly-detection designs use — that is a legitimate future capability, not a starting point. A single-feature-AUC
+    sweep (the same check that caught Memory's shortcut) found <b>0 of 78 features exceed 0.95 AUC</b> on train or test;
+    top feature <code>Fwd Seg Size Min</code> (train AUC 0.736 / test 0.848) is informative, not a giveaway — this
+    model's performance reflects genuine multi-feature learning despite CSE-CIC-IDS2018 also being a fixed-testbed
+    capture.</p>
+
+    <span class="lbl">Data-quality handling (10 issues, each handled deliberately)</span>
+    <p>Non-uniform column count (the <code>Thuesday-20-02-2018</code> file has 84 vs 80 — 4 leading identity columns
+    <b>dropped</b>, not aligned, so a model cannot memorise which fixed testbed machine was the attacker);
+    <code>Timestamp</code> excluded from features (each day is one attack scenario — a near-perfect label proxy); 59
+    literal header-repeat rows filtered via an allowlist of real observed labels; <code>Flow Byts/s</code> /
+    <code>Flow Pkts/s</code> NaN/Inf rows dropped, not imputed; inconsistent label taxonomy sidestepped via
+    case-insensitive <code>!= "benign"</code>; two-phase memory-safe loading capped the working set at 2,000,000 rows
+    (peak RSS 22.8 GiB, ~8.5 min). <b>495,181 / 2,000,000 rows (24.75%) were exact duplicates</b> — union-merged into
+    atomic groups before splitting. <b>4,742 duplicate groups spanned both benign and malicious labels</b> (identical
+    78-feature vector, contradictory ground truth — a CICFlowMeter representation limit, not leakage):
+    <b>excluded entirely from train, val, and test</b> (48,329 rows, 2.42%), saved separately for inspection. A real
+    <code>stratified_group_split</code> index bug (writing into a plain array using non-contiguous DataFrame index
+    values) was found and fixed with an explicit <code>reset_index(drop=True)</code>.</p>
+
+    <span class="lbl">Split</span>
+    <table>
+      <thead><tr><th>Split</th><th class="num">Rows</th><th class="num">% (target)</th><th class="num">Benign</th><th class="num">Malicious</th></tr></thead>
+      <tbody>
+        <tr><td>train</td><td class="num">1,526,757</td><td class="num">78.23% (80%)</td><td class="num">1,286,894</td><td class="num">239,863</td></tr>
+        <tr><td>val</td><td class="num">211,697</td><td class="num">10.85% (10%)</td><td class="num">160,864</td><td class="num">50,833</td></tr>
+        <tr><td>test</td><td class="num">213,217</td><td class="num">10.92% (10%)</td><td class="num">160,869</td><td class="num">52,348</td></tr>
+      </tbody>
+    </table>
+    <p>Total 1,951,671 rows (2,000,000 minus the 48,329 excluded ambiguous rows). <b>Invariants verified:</b> 0
+    duplicate-feature-vector groups span both labels (post-exclusion); 0 duplicate feature-vector hashes span more than
+    one split (1,591,298 unique vectors / 1,951,671 rows). A direct, accepted consequence of the leakage guarantee:
+    FTP-BruteForce and DoS-SlowHTTPTest have severe train-support skew (1,007 and 1,302 train rows vs thousands in
+    val/test) because their 18,376-row duplicate "degenerate flow" group had to land almost entirely in val/test.</p>
+
+    <span class="lbl">Threshold derivation</span>
+    <p><code>NETWORK_MALICIOUS_MIN = 0.9441855970306654</code>, via <code>find_threshold_for_fpr()</code> at
+    <b>target FPR 0.001</b> against calibrated val+test-combined probabilities (424,914 rows, <b>321,733 benign</b> —
+    ~0.0003% resolution per false positive, so sub-0.1% targets are defensible here, unlike Memory or Behavioral).</p>
+
+    <span class="lbl">Current performance</span>
+    <p>Held-out test: <b>AUC-ROC 0.9972</b>, <b>AUC-PR 0.9951</b>, <b>precision 0.9969</b>, <b>recall 0.9752</b>,
+    <b>F1 0.9859</b>, <b>FPR 0.098%</b>. Per-attack-type detection is 99.9–100% for Bot, all DDoS/DoS variants, and
+    SSH-Bruteforce; 75–91% for the under-trained web brute-force classes; and <b>10.75% for Infiltration</b>
+    (n_test 1,433, n_train 11,463). <b>ONNX export:</b> mean abs error 2.1e-4, <b>max abs error 0.5465</b> — three
+    orders looser than Static's/Memory's, root-caused to the ONNX TreeEnsemble spec (LightGBM stores split thresholds
+    as float64; ONNX's tree operator is float32-only), made visible here because Flow Duration/IAT features run up to
+    ~1.15e8. Measured practical impact: <b>only 3 of 213,217 predictions (0.0014%) flip</b> at the operating threshold
+    (two are exact boundary ties; the third is actually <i>more</i> correct in ONNX); aggregate metrics shift only in
+    the 4th decimal. Shipped as the final artifact with the limitation documented.</p>
+
+    <div class="caution">
+      <span class="lbl">Known limitation — the two reasons for the ALERT cap</span>
+      <p><b>(a) Infiltration blind spot:</b> 10.75% detection is <i>not</i> under-training (every other under-10,000-train
+      class scored ≥91% except the two duplicate-signature classes). Infiltration attacks are slow / low-volume and do
+      not produce the flow-statistics signature CICFlowMeter captures well; a comparative study found infiltration on
+      this dataset is only well-detected via NetFlow-derived features. Deliberately not chased by lowering the threshold
+      (that would spike FPR across every well-detected class). <b>(b) External-validation collapse:</b> models reported
+      "nearly perfect" on CSE-CIC-IDS2018 — which this one's numbers are — have been independently shown to degrade
+      toward random on external/real-world traffic. Plus a dataset-level ~7.5% label-noise ceiling (automatic
+      time-window labeling, not per-flow human verification) this pipeline cannot detect or correct from inside.</p>
+    </div>
+  </div>
+
+  <!-- 3.5 EMULATION -->
+  <h3>3.5 &nbsp; Cortex-Emulation</h3>
+  <div class="plain">
+    <span class="lbl">In plain terms</span>
+    <p>Emulation analysis runs a sample inside <b>Speakeasy</b>, a lightweight Windows emulator, and records the API
+    calls it makes — a way to observe behavior without letting the sample touch a real machine. A neural network then
+    judges that trace. Testing showed a serious problem: a model trained on samples collected in January 2022 detects
+    only about 42% of malware collected just three months later, and making the model smaller does not help. It also
+    barely beats a trivial lookup table. Because of this, <b>Emulation is trained but kept entirely out of the
+    decision</b> — its verdict is logged for analysis only.</p>
+  </div>
+  <div class="tech">
+    <span class="lbl">What it detects and why it is a separate signal</span>
+    <p>Malicious behavior observed in a Speakeasy emulation trace (API-name sequence), before the sample runs on a real
+    host — complementary to Behavioral's real-execution traces.</p>
+
+    <span class="lbl">Dataset &amp; provenance</span>
+    <p><b>Quo Vadis</b> (Trizna et al., 2022/2024), HuggingFace <code>dtrizna/quovadis-speakeasy</code> —
+    Speakeasy-emulator-generated malware/benign execution reports. <b>Licence verified explicitly before downloading</b>
+    (Apache-2.0, confirmed via both the HF <code>license</code> tag and the card text). 92,700 files: <b>75,298 train
+    collected January 2022, 17,402 test collected April 2022</b> — a deliberate concept-drift split by the dataset's
+    authors, <b>preserved, not re-randomised</b>. ~5.5 GiB.</p>
+
+    <span class="lbl">Architecture chosen, and why</span>
+    <p>Same family as Cortex-Behavioral — 1D-CNN + multi-head self-attention (<code>models/emulation_cnn.py</code>) —
+    with three deliberate, documented deviations tuned to this data: <code>embed_dim=64</code> (not Behavioral's 128,
+    because the vocabulary is ~8× larger — 3,152 real API names — with no more training data, so a bigger embedding
+    table would add untrainable dimensions); <code>dropout=0.4</code> (not 0.3, to resist memorising rare-token
+    patterns); <code>batch_size=64</code>; <code>MAX_SEQ_LEN=500</code> (p90–p99 of the real sequence-length
+    distribution). Conv/attention capacity kept unchanged as a reasoned starting point (Behavioral's own train set,
+    ~7,340 examples, is the same order of magnitude as this signal's 6,070). 777,345 parameters. Raw sigmoid, no
+    calibration layer (checked: the Platt-calibration bug fixed for Static's ONNX export was LightGBM-<code>predict_proba</code>-specific
+    with no torch-path analogue).</p>
+    <p><b>Divergence from the reference:</b> deliberately <b>not</b> the reference GRU / opcode design — the real data
+    has no opcode or memory-access-pattern signal. Modeling population restricted to <code>module_entry</code> rows
+    only; <code>thread</code> / <code>tls_callback_*</code> rows stay in the canonical parquet but are excluded from
+    train/val/test. Within <code>module_entry</code>, exact-duplicate API-name sequences are collapsed to one
+    representative per unique sequence (a <code>duplicate_count</code> column is retained), done <b>separately per era</b>
+    so the concept-drift comparison is preserved.</p>
+
+    <span class="lbl">Split &amp; training</span>
+    <p>Train 6,070 unique sequences (benign 4,044 / malicious 2,026), val 675 (450/225), test 2,495 (1,936/559). Early
+    stop on val ROC-AUC plus an explicit train/val AUC-gap overfitting monitor (stop if <code>train_auc − val_auc &gt; 0.05</code>
+    for 3 consecutive epochs). The primary run (<code>embed_dim=64</code>) hit the overfitting stop at epoch 22 (best
+    epoch 19, val AUC 0.9495); val AUC plateaued ~0.94 by epoch 8 while train AUC ran to 0.995 — the model memorises
+    the ~6k collapsed training sequences trivially. Held-out test AUC-ROC <b>0.8737</b>.</p>
+
+    <span class="lbl">Threshold derivation</span>
+    <p><code>EMULATION_MALICIOUS_MIN = 0.999358594417572</code> — the target-FPR-1% point from the val+test sweep
+    (2,386 benign, <b>pooling Jan and Apr eras, flagged explicitly</b>). <b>For logging / telemetry only.</b> The score
+    distribution is strongly bimodal; at this threshold pooled detection is only <b>~49.9%</b> (~24 expected FP). The
+    0.1% target (~2 FP) is too thin to trust.</p>
+
+    <span class="lbl">Current performance and the two disqualifying findings</span>
+    <p><b>Finding 1 — ablation-confirmed Jan→Apr concept-drift collapse.</b> At the 1%-FPR threshold, malicious recall
+    drops from <b>70.7% (Jan-era slice) to 41.5% (Apr-era slice)</b>, AUC-ROC 0.949 → 0.874; benign FPR holds
+    ~0.7–1% in both eras, so the loss is entirely malicious-side. Re-running at <code>embed_dim=32</code> (the
+    overfitting stop's own first recommendation): the stop fired <i>earlier</i> (epoch 18, worse on every axis) and the
+    drift gap <b>did not move</b> — recall 68.0% → 38.3% (29.7 pp gap vs 29.2 pp at <code>embed_dim=64</code>).
+    <b>Capacity reduction fixed nothing</b> — this is a genuine train/test distribution shift, not an overfitting
+    artifact. A per-family diagnostic shows the model memorises token sequences rather than learning generalizable
+    behavior: it fires near what it memorised and goes quiet on modest drift, and for a family with too thin a
+    distinct-sequence base (<code>coinminer</code>: 185 unique train sequences vs <code>ransomware</code>'s 1,065) it
+    never builds a firing region at all — <code>coinminer</code> stays ~15–25% detected across every match bucket,
+    including exact train matches.</p>
+    <p><b>Finding 2 — thin margin over a trivial baseline.</b> Test accuracy at the 1%-FPR threshold is <b>86.4%</b>
+    (<code>embed_dim=64</code>) / 85.6% (<code>embed_dim=32</code>), against a majority-class baseline of <b>77.6%</b>
+    and an exact train-sequence duplicate-lookup of <b>82.2%</b>. The model beats the lookup table by only
+    <b>+4.1 pp</b> / +3.3 pp.</p>
+
+    <div class="caution">
+      <span class="lbl">Disposition — stricter than an ALERT cap</span>
+      <p>Cortex-Emulation has <b>no branch in <code>decide()</code></b>. <code>emulation_verdict_from_score()</code> and
+      <code>EmulationVerdict</code> exist for logging only. This mirrors the earlier research repo's own Behavioral v2
+      category signal (<code>deployment_status: additive_report_only_not_in_policy_decision</code>). A signal that
+      recovers ~40% of malware on the next collection era and barely beats a lookup table cannot carry autonomous
+      <i>or</i> ALERT authority. No ONNX export and no <code>pipeline.py</code> wiring for this signal. A genuine fix
+      would most likely need engineered behavioural-category features (coarser file/registry/network/injection activity
+      classes, hypothesised to be more temporally stable) or training data spanning more collection dates — explicitly
+      <b>not</b> more hyperparameter tuning, which the ablation ruled out.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ==================== 4. POLICY ENGINE ==================== -->
+<div class="section">
+  <div class="section-num">Section 4</div>
+  <h2>Policy Engine / Decision Logic</h2>
+
+  <div class="plain">
+    <span class="lbl">In plain terms</span>
+    <p>The policy engine turns up to five signal verdicts into <b>one</b> final decision. It does this with a strict
+    checklist, top to bottom: the first rule that matches wins. It <b>never averages or blends scores</b> — a weak
+    "maybe" from four signals cannot add up to a strong verdict. The order encodes trust: a Static BLOCK is checked
+    first and is always final; a Behavioral MALICIOUS comes next and can TERMINATE a process; Memory and Network can
+    only ever raise an ALERT, no matter how confident they are; Emulation is not consulted at all. Any error or failed
+    check falls through to ALERT — never to a silent "allow".</p>
+  </div>
+
+  <div class="tech">
+    <span class="lbl">The priority chain (<code>inference/policy_engine.py :: decide()</code>)</span>
+    <table>
+      <thead><tr><th class="num">#</th><th>Condition</th><th>Final decision</th><th>Reason code</th></tr></thead>
+      <tbody>
+        <tr><td class="num">1</td><td>static verdict == BLOCK</td><td class="tier-auto">BLOCK</td><td><code>static_block</code></td></tr>
+        <tr><td class="num">2</td><td>behavioral verdict == MALICIOUS</td><td class="tier-auto">TERMINATE</td><td><code>behavioral_malicious</code></td></tr>
+        <tr><td class="num">3</td><td>memory verdict == MALICIOUS</td><td class="tier-alert">ALERT (capped)</td><td><code>memory_malicious</code></td></tr>
+        <tr><td class="num">4</td><td>network verdict == MALICIOUS</td><td class="tier-alert">ALERT (capped)</td><td><code>network_malicious</code></td></tr>
+        <tr><td class="num">5</td><td>static verdict == ALERT</td><td class="tier-alert">ALERT</td><td><code>static_alert</code></td></tr>
+        <tr><td class="num">6</td><td>static verdict == ERROR</td><td class="tier-alert">ALERT</td><td><code>static_scan_error</code></td></tr>
+        <tr><td class="num">7</td><td>behavioral verdict == ERROR</td><td class="tier-alert">ALERT</td><td><code>behavioral_scan_error</code></td></tr>
+        <tr><td class="num">8</td><td>memory verdict == ERROR</td><td class="tier-alert">ALERT</td><td><code>memory_scan_error</code></td></tr>
+        <tr><td class="num">9</td><td>network verdict == ERROR</td><td class="tier-alert">ALERT</td><td><code>network_scan_error</code></td></tr>
+        <tr><td class="num">10</td><td>otherwise</td><td class="tier-auto">ALLOW</td><td><code>no_malicious_evidence</code></td></tr>
+      </tbody>
+    </table>
+    <p>Emulation appears nowhere in this chain by design. There is no <code>emulation_verdict ==</code> branch.</p>
+
+    <span class="lbl">Autonomous authority vs. capped authority — and exactly why each cap exists</span>
+    <table>
+      <thead><tr><th>Signal</th><th>Max action it can cause</th><th>Capped?</th><th>Why the cap / why not</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><b>Static</b></td>
+          <td class="tier-auto">BLOCK</td>
+          <td><b>No cap.</b> Checked first, unconditional.</td>
+          <td>The one verdict in the whole system with no cap and no dependency on any other signal. Validated across
+          three independent implementations (AUC 0.997–0.999) and against real malware and signed Microsoft tools.</td>
+        </tr>
+        <tr>
+          <td><b>Behavioral</b></td>
+          <td class="tier-auto">TERMINATE</td>
+          <td><b>No cap.</b> Second in priority.</td>
+          <td>Strong AUC (0.992–0.997) across three implementations; a MALICIOUS runtime-behavior verdict is
+          high-confidence evidence of an active threat and warrants killing the process.</td>
+        </tr>
+        <tr>
+          <td><b>Memory</b></td>
+          <td class="tier-alert">ALERT only</td>
+          <td><b>Capped.</b> Cannot TERMINATE/BLOCK regardless of score.</td>
+          <td>Trained/threshold-derived on CIC-MalMem-2022 only (a fixed lab corpus), not validated against real
+          injected-process samples. Its near-perfect test metrics are themselves suspect: 22/62 features individually
+          exceed 0.95 AUC, consistent with the dataset's single-VM benign collection. Letting an unvalidated signal
+          autonomously kill a process risks terminating a legitimate one on a false positive with no field evidence to
+          rule it out.</td>
+        </tr>
+        <tr>
+          <td><b>Network</b></td>
+          <td class="tier-alert">ALERT only</td>
+          <td><b>Capped.</b> Same rung as Memory.</td>
+          <td>Two independent legs: (a) Infiltration detection is only 10.75% — Network structurally cannot be trusted
+          alone for slow/low-volume attacks, exactly the class Behavioral and Memory have process-level visibility
+          into; (b) a documented external-validation-collapse pattern for CSE-CIC-IDS2018 (near-perfect lab scores
+          degrade toward random on real traffic), plus a ~7.5% dataset label-noise ceiling. Having both legs is why the
+          cap is treated as at least as firm as Memory's.</td>
+        </tr>
+        <tr>
+          <td><b>Emulation</b></td>
+          <td class="tier-report">None — report-only</td>
+          <td><b>Not in <code>decide()</code> at all.</b></td>
+          <td>Ablation-confirmed Jan→Apr 2022 temporal concept-drift collapse (malicious recall ~71% → ~42%, unchanged
+          by capacity reduction) and only ~+3–4 pp test accuracy over a trivial train-sequence duplicate-lookup. A
+          signal that loses ~40% of its malware detection on the next collection era, and barely beats a lookup table,
+          cannot carry autonomous or ALERT authority. Revisit only with a materially different model.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <span class="lbl">Design invariants</span>
+    <ul>
+      <li><b>Verdicts, not scores.</b> <code>decide()</code> receives enum verdicts; the numeric scores never enter it.
+      No weighting, averaging, or ensembling anywhere in the decision path.</li>
+      <li><b>Static BLOCK is always protected.</b> Rule 1 returns immediately; nothing downstream can soften it, and
+      Behavioral is never even run after a BLOCK.</li>
+      <li><b>Upgrade-only for lower signals.</b> Memory/Network MALICIOUS can raise an otherwise-ALLOW/ALERT outcome to
+      ALERT, but can never reach BLOCK or TERMINATE.</li>
+      <li><b>Fail-closed.</b> Every ERROR path yields ALERT. The default final decision on the dataclass is ALERT, not
+      ALLOW; ALLOW is only reached by explicitly exhausting every malicious/error condition.</li>
+    </ul>
+  </div>
+</div>
+
+<!-- ==================== 5. KNOWN LIMITATIONS ==================== -->
+<div class="section">
+  <div class="section-num">Section 5</div>
+  <h2>Known Limitations and Risk Mitigations</h2>
+  <p>This section is deliberately prominent, not an appendix. Every limitation below is real, documented in the
+  repository, and reflected in how much authority the policy engine grants the affected signal. For each: the risk in
+  plain language, the technical evidence, why the policy engine caps that signal as a <i>direct, evidence-based</i>
+  consequence, and what it would take to lift the cap.</p>
+
+  <h3>5.1 &nbsp; Memory — single-VM benign artifact</h3>
+  <div class="plain">
+    <span class="lbl">The risk, plainly</span>
+    <p>The Memory model's benign training examples all come from <b>one baseline virtual machine</b>. The model may have
+    learned to recognise "that specific machine's normal state" rather than "the absence of malicious activity." On a
+    different clean machine it could raise false alarms — or, worse, miss malice on a system that simply does not look
+    like the training VM.</p>
+  </div>
+  <div class="tech">
+    <p><b>Technical evidence.</b> A single-feature-AUC sweep over all 62 raw+derived features found <b>22 of them
+    individually exceed 0.95 AUC</b>, confirmed identically on the training split and the never-touched test split
+    (ruling out our own split leaking — separately verified: 0/32,106 sample-id groups and 0/58,596 duplicate
+    feature-vector hashes span splits). Example bands (train): <code>handles.avg_handles_per_proc</code> 208–318 for
+    benign (std 17.5) vs 71–33,784 for malware; <code>dlllist.avg_dlls_per_proc</code> 34.5–53.2 for benign vs down to
+    7.3 for malware. One derived feature (<code>svcscan_driver_ratio</code>) has 5.8× the gain of the next-best. This
+    pervasive, held-out-stable separability matches CIC-MalMem-2022's <i>documented</i> collection methodology: every
+    benign sample is a repeated capture of "normal user behavior" on a single baseline Windows 10 VM; malicious samples
+    span far more varied executions.</p>
+    <p><b>Why the policy engine caps Memory at ALERT.</b> Because the near-perfect held-out metrics (AUC 1.0, recall
+    1.0) are plausibly an artifact of that single-VM benign collection, they are evidence to <i>keep</i> the cap, not
+    to lift it. An unvalidated signal must not autonomously TERMINATE/BLOCK a process it cannot be trusted to have
+    judged on malice rather than machine identity. Memory still runs as a fully independent signal (not gated behind
+    Static) so it can raise an ALERT on fileless activity.</p>
+    <p><b>What would lift the cap.</b> Memory captures from <b>multiple genuinely different, non-baseline benign
+    machines</b>, plus validation against real injected-process samples outside CIC-MalMem-2022's test set. More rows
+    from the same dataset would not qualify. Also open: a way to identify benign <i>near</i>-duplicate capture sessions
+    (only exact duplicates are currently merged).</p>
+  </div>
+
+  <h3>5.2 &nbsp; Network — Infiltration blind spot &amp; external-validation collapse</h3>
+  <div class="plain">
+    <span class="lbl">The risk, plainly</span>
+    <p>Two things. First, the Network model is <b>almost blind to slow, quiet intrusions</b> ("Infiltration"): it
+    catches only about one in ten. Second, models that look near-perfect on this particular dataset have repeatedly been
+    shown to <b>fall apart on real-world traffic</b>. So its clean lab numbers should not be read as production-ready.</p>
+  </div>
+  <div class="tech">
+    <p><b>Technical evidence — Infiltration.</b> Held-out test detection for Infiltration is <b>10.75%</b> (n_test
+    1,433) despite <b>11,463 training rows</b> — every other class with under 10,000 train rows still scored ≥91%
+    (except FTP-BruteForce and DoS-SlowHTTPTest, which are high only because of a near-degenerate duplicate flow
+    signature). This is a CICFlowMeter feature-representation ceiling: infiltration is slow / low-volume by design and
+    does not produce the flow-statistics signature CICFlowMeter captures well; an independent comparative study found
+    infiltration on this dataset is only well-detected using NetFlow-derived features. Lowering the threshold to chase
+    it would spike FPR across every well-detected class.</p>
+    <p><b>Technical evidence — external validation.</b> A documented pattern specific to CSE-CIC-IDS2018: models
+    reported "nearly perfect" on it (Cortex-Network's test AUC is 0.9972) have been independently shown elsewhere to
+    degrade toward random performance on external/real traffic. Plus an independently reported <b>~7.5% label-noise
+    ceiling</b> from the dataset's automatic time-window-based labeling — some fraction of both the training signal and
+    the "ground truth" behind every metric here is simply wrong, undetectably from inside the dataset.</p>
+    <p><b>Why the policy engine caps Network at ALERT.</b> Two independent legs, either sufficient alone: (a) the
+    Infiltration gap means Network cannot be trusted alone for slow/quiet threats — but that class is exactly what
+    Behavioral (API sequences) and Memory (process/injection artifacts) have process-level visibility into, so system
+    coverage still holds without giving Network autonomous authority; (b) external-validation collapse means the clean
+    test numbers cannot be assumed to predict field performance. Having both legs is why this cap is treated as at
+    least as firm as Memory's.</p>
+    <p><b>What would lift the cap.</b> Independent validation on real network traffic that CSE-CIC-IDS2018 did not
+    generate; and, for Infiltration specifically, a NetFlow-derived feature representation (a documented future option,
+    not applied).</p>
+  </div>
+
+  <h3>5.3 &nbsp; Emulation — confirmed Jan→Apr concept-drift collapse</h3>
+  <div class="plain">
+    <span class="lbl">The risk, plainly</span>
+    <p>The Emulation model was trained on samples from January 2022 and tested on samples from April 2022 — only three
+    months apart. Its malware detection <b>fell by roughly 30 percentage points</b> over that gap. Shrinking the model
+    to reduce overfitting did not change this at all, which means the model is memorising specific call sequences rather
+    than learning what malicious behavior looks like. It also barely beats a lookup table.</p>
+  </div>
+  <div class="tech">
+    <p><b>Technical evidence.</b> At the 1%-FPR threshold, malicious recall drops from <b>70.7% on the Jan-era slice to
+    41.5% on the Apr-era slice</b> (AUC-ROC 0.949 → 0.874); benign FPR holds ~0.7–1% across both eras, so the loss is
+    entirely malicious-side. A pre-committed capacity fallback was tested: at <code>embed_dim=32</code> the overfitting
+    stop fired earlier (epoch 18 vs 22, worse on every axis) and the drift gap <b>did not move</b> — 68.0% → 38.3%
+    (29.7 pp) vs 29.2 pp at <code>embed_dim=64</code>. Per-family diagnosis: <code>coinminer</code> (185 unique train
+    sequences) stays ~15–25% detected in every match bucket including exact train matches — the model never built a
+    firing region for it — while <code>ransomware</code> (1,065 unique train sequences) tracks match quality
+    (exact-match Apr rows 70% detected, near-match only 29%). Mechanism: <b>the model memorises token sequences rather
+    than learning generalizable behavior</b>. Margin check: test accuracy 86.4% vs a majority-class 77.6% and an exact
+    train-sequence duplicate-lookup 82.2% — <b>+4.1 pp over the lookup table</b>.</p>
+    <p><b>Why the policy engine excludes Emulation entirely.</b> This is stricter than the Memory/Network ALERT cap:
+    Emulation has <b>no branch in <code>decide()</code></b> and its threshold is set for telemetry only. A signal that
+    loses ~40% of its malware detection on the very next collection era, with capacity reduction ruled out as the
+    lever, and that beats a lookup table by ~3–4 pp, cannot carry autonomous <i>or</i> ALERT authority. This mirrors
+    the earlier research repo's own precedent for its Behavioral v2 category signal.</p>
+    <p><b>What would lift the report-only status.</b> A <i>materially different model</i>, not more tuning: most likely
+    engineered behavioural-category features (coarser activity classes, hypothesised to be more temporally stable than
+    exact API-call token sequences) or training data spanning more collection dates. Then re-assess authority from
+    scratch.</p>
+  </div>
+
+  <h3>5.4 &nbsp; Static — the recently-found, partially-fixed feature-extraction gap</h3>
+  <div class="plain">
+    <span class="lbl">The risk, plainly</span>
+    <p>A broken optional import meant one whole group of features (the digital-signature summary) was being filled with
+    zeros for <b>every file scanned live</b> — while the training data had real values there. That mismatch quietly
+    pushed live scores toward "malicious." The import is now fixed, but the live feature extractor still does not
+    perfectly match the reference used to build the training data, and there is <b>no automated test</b> that would
+    catch the next such regression.</p>
+  </div>
+  <div class="tech">
+    <p><b>Technical evidence.</b> <code>features/pe_features.py</code> imported
+    <code>from signify.authenticode import SignedPEFile</code>, an API removed in the installed <b>signify 0.9.2</b>
+    (now <code>AuthenticodeFile</code>). The module's <code>except ImportError</code> swallowed the failure,
+    <code>_SIGNIFY_AVAILABLE</code> became <code>False</code>, and the 8-dim <code>authenticode</code> group returned
+    <b>all-zeros for every file at inference</b> — a train/serve skew, because EMBER2024's training vectors carry real
+    authenticode features. It was caught only by manually re-scanning the 5 cortex-endpoint validation files and
+    noticing <code>svchost.exe</code> (a signed Microsoft binary) scored 0.99 where cortex-endpoint scored 0.47.
+    <b>Partial fix applied:</b> ported to the 0.9.x API; <code>svchost.exe</code> now parses a genuine chain
+    (<code>num_certs=1</code>, real countersigning timestamp), and the <code>authenticode</code> group contribution
+    moved from +1.17 (wrongly toward malicious) to −1.33 (toward benign), shifting its score 0.9913 → 0.9839.
+    <b>Not fixed:</b> <code>svchost.exe</code> still does not reach ALLOW (0.9839 vs 0.4744). The residual ~2.0
+    raw-margin gap is a broader fidelity problem — <code>pe_features.py</code> produces a vector systematically shifted
+    toward "malicious" vs the thrember reference (<code>header</code> pushes harder: +3.75 vs +3.36; benign-side groups
+    softer: <code>histogram</code> −0.51 vs −0.83; the hand-rolled 8-feature <code>authenticode</code> group carries
+    less signal than thrember's even when populated: −1.33 vs −2.12).</p>
+    <p><b>Current 5-file comparison (post-fix, static-only — behavioral/memory have no input, network isn't wired):</b></p>
+    <table>
+      <thead><tr><th>File</th><th>cortex-endpoint</th><th>cortex-ml (post-fix)</th><th>Agree?</th></tr></thead>
+      <tbody>
+        <tr><td><code>svchost.exe</code></td><td>0.4744 / allow</td><td>0.9839 / ALERT</td><td>No — feature-fidelity gap</td></tr>
+        <tr><td><code>notepad_test.exe</code></td><td>0.0057 / allow</td><td>0.0062 / ALLOW</td><td>Yes</td></tr>
+        <tr><td><code>benign_test_50mb.exe</code></td><td>0.9690 / alert</td><td>0.9950 / BLOCK</td><td>No — stricter BLOCK threshold + ~3e-5 boundary tie</td></tr>
+        <tr><td><code>notepadd.exe</code></td><td>0.7746 / alert</td><td>0.9917 / ALERT</td><td>Yes (verdict)</td></tr>
+        <tr><td><code>extractor.exe</code></td><td>0.9820 / block</td><td>0.9956 / block</td><td>Yes</td></tr>
+      </tbody>
+    </table>
+    <p><b>Why this matters for policy.</b> Static holds the highest, uncapped authority in the system, so a silent
+    extractor regression degrades every live static score — including BLOCK decisions — with no error surfaced. The gap
+    does not currently change Static's authority tier (it remains validated across three implementations), but it is the
+    <b>top open correctness item</b> for the static path and a live-score accuracy risk until closed.</p>
+    <p><b>What would close it.</b> (1) Build an automated feature-parity test comparing <code>pe_features.py</code>
+    output against a pinned thrember reference on real PEs including a signed one — the check that would have caught the
+    signify regression immediately (cortex-endpoint has exactly this;
+    <code>cortex-ml</code> does not). (2) Close the residual per-group fidelity gap so the live vector stops skewing
+    toward "malicious."</p>
+  </div>
+</div>
+
+<!-- ==================== 6. ENGINEERING DISCIPLINE ==================== -->
+<div class="section">
+  <div class="section-num">Section 6</div>
+  <h2>Engineering Discipline</h2>
+
+  <div class="plain">
+    <span class="lbl">In plain terms</span>
+    <p>Every one of the five signals was built the same careful way: check the data's structure against the <b>actual
+    files</b>, not the documentation (which was wrong more than once); actively hunt for <b>data leakage</b> — where the
+    answer accidentally leaks from the training set into the test set — rather than assume the data is clean; and
+    <b>re-derive every decision threshold from scratch</b> against the model actually trained here, never copy a number
+    from a previous project. This process caught real, score-changing bugs in every signal.</p>
+  </div>
+
+  <div class="tech">
+    <span class="lbl">Schema validation against real data, not documentation</span>
+    <ul>
+      <li><b>Memory:</b> CIC-MalMem-2022 validated structurally against the real file — column count, dtypes, exact
+      <code>Class</code> value set, first/last column identity.</li>
+      <li><b>Emulation:</b> the Quo Vadis dataset card's documented schema is <i>wrong</i> — it describes each file as
+      <code>{"sha256": ..., "entry_points": [...]}</code>; the real files are a bare JSON list with no wrapper and no
+      <code>sha256</code> field (recoverable only from the filename). One category
+      (<code>report_windows_syswow64</code>, 294 files) uses a completely different filename scheme. The card's own
+      row-count table is off by 3 from the real repository; its prose numbers are staler still. All verified by a full
+      diff against the real file listing.</li>
+      <li><b>Network:</b> the real S3 bucket structure and the 84-vs-80 column discrepancy were confirmed against the
+      actual CSVs, not assumed from the docs; the label allowlist was built by scanning 16.2M real label values.</li>
+    </ul>
+
+    <span class="lbl">Real leakage checks — with the bugs they caught</span>
+    <ul>
+      <li><b>Behavioral:</b> a naive split left <b>85 sequences spanning multiple splits</b>; fixed with a grouped
+      stratified split keyed on identical <code>api_calls</code> sequences (verified 0 after).</li>
+      <li><b>Memory:</b> a grouping-detection bug (using only "median group size &gt; 1") treated the constant
+      <code>"Benign"</code> Category as one giant real group and put all synthetic benign rows in one split — caught on
+      a synthetic dataset shaped like the real one before it ever ran on real data. Then, on the real 58,596 rows,
+      <b>20 duplicate feature-vector hashes (80 rows) spanned multiple splits</b>; fixed with a union-find merge that
+      unions sample-id groups with exact-duplicate-vector groups before allocation, making cross-split duplication
+      structurally impossible.</li>
+      <li><b>Network:</b> <b>495,181 / 2,000,000 rows (24.75%) exact duplicates</b>; <b>4,742 duplicate groups spanning
+      both benign and malicious labels</b> excluded entirely from train/val/test; and a real
+      <code>stratified_group_split</code> index bug (writing into a plain array with non-contiguous index values,
+      "working by coincidence") fixed with <code>reset_index(drop=True)</code>.</li>
+      <li><b>Emulation:</b> <b>96.8% of entry-point rows were exact duplicates</b>; an early naive split produced a val
+      set that was 90.2% malicious because one 4,312-row duplicate group dominated it. The <code>apihash</code> field
+      was validated rather than trusted — <b>686 / 6,699 apihash groups (10.2%) were false merges</b> — so the pipeline
+      falls back to a hand-computed sequence hash.</li>
+    </ul>
+
+    <span class="lbl">Thresholds re-derived from scratch, never inherited</span>
+    <p>Every signal's operating threshold is derived against <i>its own</i> trained model's calibrated probabilities —
+    Static (<code>find_threshold_for_fpr()</code> at FPR 0.01 / 0.001 on 539,940 test rows), Behavioral (a sweep on
+    val+test, deliberately not a precise FPR target given only 274 benign), Memory (FPR 0.01 on 5,860 benign), Network
+    (FPR 0.001 on 321,733 benign), Emulation (FPR 1% sweep, telemetry only). None carried over the prior project's
+    placeholder values. The README states plainly: "If you retrain any model from scratch, the raw score distribution
+    will differ and these need to be re-derived again, not assumed to still hold."</p>
+
+    <span class="lbl">Three concrete bugs found and fixed — evidence of process quality</span>
+    <div class="note">
+      <p><b>1 · The Platt-calibration bug (Static ONNX export).</b> <code>export_static_lgbm_to_onnx()</code> had been
+      written earlier but never run against the real trained model. First run surfaced that the raw LightGBM booster's
+      output and <code>predict_proba()</code> (which applies a Platt calibrator on top) <b>differ by up to 0.213</b> on
+      real test data — and the deployed thresholds were derived against the <i>calibrated</i> distribution. Exporting
+      the bare booster would have silently shipped a model whose scores no longer matched its thresholds. Fixed by
+      merging the calibrator's <code>LogisticRegression</code> (via skl2onnx) into the same ONNX graph as the booster
+      (via onnxmltools), chained after a <code>Slice</code> that extracts the malicious-class column. Two further
+      version bugs fixed en route (opset-15 cap hardcoded to 17; IR-version / duplicate-tensor-name mismatches before
+      <code>merge_models</code>). Verified against 10,000 real rows: max abs diff 0.0032, zero verdict differences.</p>
+    </div>
+    <div class="note">
+      <p><b>2 · The Memory duplicate-hash leak.</b> On the real 58,596-row dataset, <b>20 duplicate feature-vector
+      hashes (80 rows, 0.14%)</b> spanned multiple splits — 8 groups / 55 rows benign-only (no per-sample identifier
+      exists for benign rows), 11 groups / 25 rows cross-malware-family collisions (different samples, coincidentally
+      identical coarse VolMemLyzer summary stats). A separate crash was also fixed:
+      <code>verify_zero_duplicate_feature_hashes</code> tried to hash the string <code>split</code> column itself,
+      failing to cast <code>"train"</code>/<code>"val"</code>/<code>"test"</code> to float64. Final verified state:
+      0/32,106 sample-id groups and 0/58,596 duplicate feature-vector hashes span more than one split.</p>
+    </div>
+    <div class="note">
+      <p><b>3 · The <code>signify</code> import break (Static live extraction).</b> <code>features/pe_features.py</code>
+      imported <code>from signify.authenticode import SignedPEFile</code>, removed in signify 0.9.2. The
+      <code>except ImportError</code> swallowed it silently, so the 8-dim <code>authenticode</code> feature group
+      returned all-zeros for every live scan while training vectors had real values — a train/serve skew invisible to
+      offline eval. Caught only by a manual 5-file comparison (<code>svchost.exe</code> scoring 0.99 vs
+      cortex-endpoint's 0.47). Now ported to the 0.9.x <code>AuthenticodeFile</code> API. This is precisely the class
+      of regression an automated feature-parity test would catch immediately — building one is the top open static-path
+      item (§5.4, §7).</p>
+    </div>
+  </div>
+</div>
+
+<!-- ==================== 7. STATUS & NEXT STEPS ==================== -->
+<div class="section">
+  <div class="section-num">Section 7</div>
+  <h2>Current Status and Next Steps</h2>
+
+  <div class="plain">
+    <span class="lbl">In plain terms</span>
+    <p>Four of the five signals are fully trained, verified, and exported; the fifth (Emulation) is trained but
+    intentionally parked. The core detection engine works end-to-end for the file-and-behavior path. The main gaps are
+    validation-related: proving the newer signals on real-world data, adding a test that guards the static feature
+    extractor, stress-testing the behavioral threshold, and packaging the whole thing as a runnable tool rather than a
+    Python library.</p>
+  </div>
+
+  <div class="tech">
+    <span class="lbl">What is trained and committed</span>
+    <table>
+      <thead><tr><th>Item</th><th>State</th><th>Git status</th></tr></thead>
+      <tbody>
+        <tr><td>Cortex-Static — LightGBM, Platt-calibrated, ONNX-exported</td><td>Trained &amp; verified (AUC 0.9988)</td><td>Committed (2026-08-19, 4 commits <code>6cd4131</code>…<code>0e295c7</code>)</td></tr>
+        <tr><td>Cortex-Behavioral — 1D-CNN+attention, ONNX + INT8</td><td>Trained &amp; verified (AUC 0.9973)</td><td>Committed (2026-08-19)</td></tr>
+        <tr><td>Cortex-Memory — LightGBM, ONNX-exported</td><td>Trained &amp; verified (AUC 1.0)</td><td>Committed (2026-08-27, <code>9331159</code>)</td></tr>
+        <tr><td>Cortex-Network — LightGBM, ONNX-exported (documented precision caveat)</td><td>Trained &amp; verified (AUC 0.9972)</td><td>Committed (2026-08-27, <code>9331159</code>)</td></tr>
+        <tr><td>Cortex-Emulation — 1D-CNN+attention</td><td>Trained; report-only; no ONNX; not wired</td><td>Committed (2026-08-27, <code>9331159</code>)</td></tr>
+        <tr><td>Policy engine + pipeline (Static→Behavioral gate, independent Memory)</td><td>Working end-to-end</td><td>Committed</td></tr>
+        <tr><td><code>signify</code> 0.9.x fix + these documentation updates</td><td>Applied</td><td><b>Uncommitted</b> working-tree change on top of <code>9331159</code></td></tr>
+      </tbody>
+    </table>
+
+    <span class="lbl">What is still open — the roadmap, honestly framed</span>
+    <ol>
+      <li><b>Real-world malware / signed-binary validation (in progress).</b> The 5 real test files have been run
+      through <code>CortexPipeline.scan()</code> (2026-08-27): the pipeline works end-to-end (static-only for bare
+      <code>.exe</code>s), verdicts agree on 3/5. <code>svchost.exe</code> disagrees (feature-fidelity gap, §5.4);
+      <code>benign_test_50mb.exe</code> disagrees for a separate, expected reason (stricter BLOCK threshold + a ~3e-5
+      boundary tie). Broader validation against live malware and more signed binaries is not yet done.</li>
+      <li><b>The missing feature-parity test (top static-path item).</b> Nothing compares <code>pe_features.py</code>
+      output against a reference (thrember) extractor on real PEs, signed one included — the check cortex-endpoint has
+      and cortex-ml lacks. A silent extraction regression currently degrades every live static score with no error.</li>
+      <li><b>Close the residual <code>pe_features.py</code>-vs-thrember fidelity gap</b> — the live vector skews toward
+      "malicious" (<code>header</code> pushes harder, benign-side groups softer, hand-rolled <code>authenticode</code>
+      weaker).</li>
+      <li><b>Behavioral threshold generalization stress test.</b> Subject <code>cortex-ml</code>'s 0.60 threshold to a
+      held-out generalization check structured like the one that broke the prior research-repo model (near-zero
+      validation FPR → 3.09% test FPR).</li>
+      <li><b>Memory &amp; Network authority caps — flagged for revisit, not permanent.</b> Lifting them requires
+      real-world validation beyond each dataset's own test split (real injected-process samples for Memory; real
+      external traffic for Network), not better lab metrics.</li>
+      <li><b>Emulation — report-only pending a materially different model.</b> Prototype engineered
+      behavioural-category features or gather training data across more collection dates, then re-assess authority. No
+      ONNX export until the model is worth shipping.</li>
+      <li><b>Network pipeline wiring.</b> The model, threshold, and verdict function exist; <code>pipeline.py</code>
+      needs a network-input path and a call into <code>decide()</code>.</li>
+      <li><b>CLI packaging.</b> <code>cortex-ml</code> is a Python library, not yet a deployable agent — no packaged CLI
+      (mirroring cortex-endpoint's <code>scan</code> / <code>scan-behavioral</code> / <code>scan-combined</code>
+      surface) and no PyInstaller build. This gap has grown as signals were added. Prior lessons to reapply: exclude
+      torch from the start, watch the matplotlib/PIL transitive dependency, budget for the self-flagging
+      false-positive risk from day one.</li>
+    </ol>
+  </div>
+</div>
+
+<!-- ==================== 8. APPENDIX ==================== -->
+<div class="section">
+  <div class="section-num">Section 8</div>
+  <h2>Appendix — Full Metrics, Thresholds, Splits, Config</h2>
+
+  <h3>A. Exact threshold values (<code>inference/policy_engine.py</code> / <code>config/thresholds.yaml</code>)</h3>
+  <table>
+    <thead><tr><th>Constant</th><th>Value</th><th>Rule</th><th>Derivation</th><th>Authority</th></tr></thead>
+    <tbody>
+      <tr><td><code>STATIC_ALLOW_MAX</code></td><td>0.6163460957</td><td>score &lt; this → ALLOW</td><td><code>find_threshold_for_fpr()</code>, target FPR 0.01 (actual 0.009999, det. 0.9803), calibrated EMBER2024 test (539,940 rows)</td><td rowspan="2" class="tier-auto">BLOCK<br>(uncapped)</td></tr>
+      <tr><td><code>STATIC_BLOCK_MIN</code></td><td>0.9950119117</td><td>score ≥ this → BLOCK (else ALERT)</td><td>same, target FPR 0.001 (actual 0.000997, det. 0.9168)</td></tr>
+      <tr><td><code>BEHAVIORAL_MALICIOUS_MIN</code></td><td>0.60</td><td>score ≥ this → MALICIOUS</td><td>sweep 0.10–0.99 on val+test combined (1,835 rows, 274 benign); deliberately not raised to ~0.922 to clear 1 hard benign FP scoring 0.921006</td><td class="tier-auto">TERMINATE</td></tr>
+      <tr><td><code>MEMORY_MALICIOUS_MIN</code></td><td>0.0005358&#8203;335957&#8203;155212</td><td>score ≥ this → MALICIOUS</td><td><code>find_threshold_for_fpr()</code>, target FPR 0.01 on calibrated val+test combined (11,860 rows, 5,860 benign)</td><td class="tier-alert">ALERT<br>(capped)</td></tr>
+      <tr><td><code>NETWORK_MALICIOUS_MIN</code></td><td>0.9441855&#8203;970306&#8203;654</td><td>score ≥ this → MALICIOUS</td><td><code>find_threshold_for_fpr()</code>, target FPR 0.001 on calibrated val+test combined (424,914 rows, 321,733 benign)</td><td class="tier-alert">ALERT<br>(capped; not wired)</td></tr>
+      <tr><td><code>EMULATION_MALICIOUS_MIN</code></td><td>0.9993585&#8203;94417572</td><td>score ≥ this → MALICIOUS (telemetry)</td><td>target-FPR-1% point from val+test sweep (2,386 benign, pools Jan+Apr eras)</td><td class="tier-report">Report-only</td></tr>
+      <tr><td><code>sequence.max_api_calls</code></td><td>100</td><td>Behavioral tokenizer fixed length</td><td>architecture constant</td><td>—</td></tr>
+      <tr><td><code>file.max_size_bytes</code></td><td>104,857,600 (100 MiB)</td><td>path-validation ceiling</td><td>pipeline constant</td><td>—</td></tr>
+    </tbody>
+  </table>
+  <p class="small">Full authority rationale for each tier is in §4. Emulation's constant exists for logging only —
+  <code>decide()</code> has no emulation branch.</p>
+
+  <h3>B. Per-signal held-out test metrics</h3>
+  <table>
+    <thead><tr><th>Signal</th><th>Operating point</th><th class="num">AUC-ROC</th><th class="num">Precision</th><th class="num">Recall / detection</th><th class="num">FPR</th><th class="num">Other</th></tr></thead>
+    <tbody>
+      <tr><td>Static</td><td>threshold 0.5</td><td class="num">0.9988</td><td class="num">—</td><td class="num">98.17%</td><td class="num">1.10%</td><td class="num">2,996 rounds, ~2.1 h</td></tr>
+      <tr><td>Behavioral</td><td>threshold 0.60</td><td class="num">0.9973</td><td class="num">100%</td><td class="num">98.08%</td><td class="num">—</td><td class="num">acc 98.36%; 18 epochs, ~4 min CPU</td></tr>
+      <tr><td>Memory</td><td>threshold 5.36e-4</td><td class="num">1.0</td><td class="num">0.9891</td><td class="num">1.0</td><td class="num">1.13% (33/2,930)</td><td class="num">F1 0.9945; best iter 71</td></tr>
+      <tr><td>Network</td><td>threshold 0.94419</td><td class="num">0.9972</td><td class="num">0.9969</td><td class="num">0.9752</td><td class="num">0.098%</td><td class="num">AUC-PR 0.9951; F1 0.9859; 760 iters, 54.2 s</td></tr>
+      <tr><td>Emulation (e64)</td><td>1%-FPR threshold, pooled eras</td><td class="num">0.8737</td><td class="num">—</td><td class="num">~49.9% pooled</td><td class="num">~0.96%</td><td class="num">acc 86.4%; best epoch 19; overfit-stop epoch 22</td></tr>
+    </tbody>
+  </table>
+
+  <h4>B.1 Memory threshold sweep (val+test combined, 11,860 rows, 5,860 benign)</h4>
+  <table>
+    <thead><tr><th>Target FPR</th><th class="num">Threshold</th><th class="num">Actual FPR</th><th class="num">Benign FPs</th><th class="num">Detection</th></tr></thead>
+    <tbody>
+      <tr><td>0.10%</td><td class="num">0.100225</td><td class="num">0.085%</td><td class="num">5 / 5,860</td><td class="num">99.95%</td></tr>
+      <tr><td>0.50%</td><td class="num">0.000627</td><td class="num">0.478%</td><td class="num">28 / 5,860</td><td class="num">100.00%</td></tr>
+      <tr><td><b>1.00% (chosen)</b></td><td class="num"><b>0.000536</b></td><td class="num"><b>0.939%</b></td><td class="num"><b>55 / 5,860</b></td><td class="num"><b>100.00%</b></td></tr>
+      <tr><td>2.00%</td><td class="num">0.000502</td><td class="num">1.724%</td><td class="num">101 / 5,860</td><td class="num">100.00%</td></tr>
+      <tr><td>5.00%</td><td class="num">0.000446</td><td class="num">4.744%</td><td class="num">278 / 5,860</td><td class="num">100.00%</td></tr>
+    </tbody>
+  </table>
+
+  <h4>B.2 Emulation threshold sweep (val+test combined, 2,386 benign, pools Jan+Apr eras)</h4>
+  <table>
+    <thead><tr><th>Target FPR</th><th class="num">Threshold</th><th class="num">Actual FPR</th><th class="num">Benign FPs</th><th class="num">Detection</th></tr></thead>
+    <tbody>
+      <tr><td>0.10%</td><td class="num">0.999996</td><td class="num">0.084%</td><td class="num">2 / 2,386</td><td class="num">4.2%</td></tr>
+      <tr><td>0.50%</td><td class="num">0.999887</td><td class="num">0.46%</td><td class="num">11 / 2,386</td><td class="num">44.3%</td></tr>
+      <tr><td><b>1.00% (primary)</b></td><td class="num"><b>0.999359</b></td><td class="num"><b>0.96%</b></td><td class="num"><b>23 / 2,386</b></td><td class="num"><b>49.9%</b></td></tr>
+      <tr><td>2.00%</td><td class="num">0.960831</td><td class="num">1.97%</td><td class="num">47 / 2,386</td><td class="num">55.0%</td></tr>
+      <tr><td>5.00%</td><td class="num">0.676327</td><td class="num">4.82%</td><td class="num">115 / 2,386</td><td class="num">67.1%</td></tr>
+    </tbody>
+  </table>
+
+  <h4>B.3 Emulation — concept-drift by era &amp; per-family test recall (e64, 1%-FPR threshold)</h4>
+  <table>
+    <thead><tr><th>Slice / family</th><th class="num">n_train</th><th class="num">n_test</th><th class="num">Detection / recall</th><th class="num">AUC-ROC</th></tr></thead>
+    <tbody>
+      <tr><td>Jan-2022 era slice</td><td class="num">—</td><td class="num">—</td><td class="num">70.7%</td><td class="num">0.949</td></tr>
+      <tr><td>Apr-2022 era slice</td><td class="num">—</td><td class="num">—</td><td class="num">41.5%</td><td class="num">0.874</td></tr>
+      <tr><td>Jan→Apr at <code>embed_dim=32</code></td><td class="num">—</td><td class="num">—</td><td class="num">68.0% → 38.3%</td><td class="num">—</td></tr>
+      <tr><td>trojan</td><td class="num">262</td><td class="num">79</td><td class="num">64.6%</td><td class="num">—</td></tr>
+      <tr><td>backdoor</td><td class="num">149</td><td class="num">99</td><td class="num">51.5%</td><td class="num">—</td></tr>
+      <tr><td>ransomware</td><td class="num">1,065</td><td class="num">116</td><td class="num">48.3%</td><td class="num">—</td></tr>
+      <tr><td>dropper</td><td class="num">193</td><td class="num">44</td><td class="num">47.7%</td><td class="num">—</td></tr>
+      <tr><td>keylogger</td><td class="num">112</td><td class="num">64</td><td class="num">29.7%</td><td class="num">—</td></tr>
+      <tr><td>rat</td><td class="num">60</td><td class="num">69</td><td class="num">27.5%</td><td class="num">—</td></tr>
+      <tr><td>coinminer</td><td class="num">185</td><td class="num">88</td><td class="num">17.1%</td><td class="num">—</td></tr>
+      <tr><td>clean (benign FPR)</td><td class="num">4,003</td><td class="num">1,924</td><td class="num">0.68%</td><td class="num">—</td></tr>
+      <tr><td>windows_syswow64 (benign FPR)</td><td class="num">41</td><td class="num">12</td><td class="num">0.00%</td><td class="num">—</td></tr>
+    </tbody>
+  </table>
+  <p class="small">Baselines at the 1%-FPR threshold: model test accuracy 86.4% (e64) / 85.6% (e32) vs majority-class
+  77.6% vs exact train-sequence duplicate-lookup 82.2% (571/2,495 test sequences appear verbatim in train).</p>
+
+  <h4>B.4 Network — per-attack-type test detection</h4>
+  <table>
+    <thead><tr><th>Label</th><th class="num">n_test</th><th class="num">n_train</th><th class="num">Detection</th><th>Read</th></tr></thead>
+    <tbody>
+      <tr><td>Bot</td><td class="num">3,517</td><td class="num">27,882</td><td class="num">99.94%</td><td>—</td></tr>
+      <tr><td>Brute Force -Web</td><td class="num">64</td><td class="num">484</td><td class="num">75.00%</td><td>under-trained</td></tr>
+      <tr><td>Brute Force -XSS</td><td class="num">23</td><td class="num">183</td><td class="num">91.30%</td><td>under-trained</td></tr>
+      <tr><td>DDOS attack-HOIC</td><td class="num">8,402</td><td class="num">67,211</td><td class="num">100.00%</td><td>—</td></tr>
+      <tr><td>DDOS attack-LOIC-UDP</td><td class="num">173</td><td class="num">1,384</td><td class="num">100.00%</td><td>—</td></tr>
+      <tr><td>DDoS attacks-LOIC-HTTP</td><td class="num">7,056</td><td class="num">56,453</td><td class="num">100.00%</td><td>—</td></tr>
+      <tr><td>DoS attacks-GoldenEye</td><td class="num">508</td><td class="num">4,067</td><td class="num">100.00%</td><td>—</td></tr>
+      <tr><td>DoS attacks-Hulk</td><td class="num">5,657</td><td class="num">45,255</td><td class="num">100.00%</td><td>—</td></tr>
+      <tr><td>DoS attacks-SlowHTTPTest</td><td class="num">9,105</td><td class="num">1,302</td><td class="num">100.00%</td><td>low train support, duplicate-signature effect</td></tr>
+      <tr><td>DoS attacks-Slowloris</td><td class="num">1,099</td><td class="num">8,792</td><td class="num">99.91%</td><td>—</td></tr>
+      <tr><td>FTP-BruteForce</td><td class="num">13,005</td><td class="num">1,007</td><td class="num">100.00%</td><td>low train support, duplicate-signature effect</td></tr>
+      <tr style="background:#fff4d9;"><td><b>Infilteration</b></td><td class="num">1,433</td><td class="num">11,463</td><td class="num"><b>10.75%</b></td><td><b>feature-representation ceiling, not under-training</b></td></tr>
+      <tr><td>SQL Injection</td><td class="num">8</td><td class="num">72</td><td class="num">100.00%</td><td>tiny sample</td></tr>
+      <tr><td>SSH-Bruteforce</td><td class="num">2,298</td><td class="num">14,308</td><td class="num">100.00%</td><td>—</td></tr>
+      <tr><td>Benign</td><td class="num">160,869</td><td class="num">1,286,894</td><td class="num">FPR 0.10%</td><td>—</td></tr>
+    </tbody>
+  </table>
+
+  <h3>C. Dataset sizes &amp; splits</h3>
+  <table>
+    <thead><tr><th>Signal</th><th>Dataset (licence)</th><th>Raw</th><th>Train</th><th>Val</th><th>Test</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>Static</td>
+        <td>EMBER2024, PE-format (Apache-2.0)</td>
+        <td>4,680,000 train / 1,080,000 test raw (≈2× dup)</td>
+        <td>2,340,000 unique (100% of dedup used)</td>
+        <td>200,000 (from fitting pool in reference pipeline)</td>
+        <td>539,940 unique</td>
+      </tr>
+      <tr>
+        <td>Behavioral</td>
+        <td>Mal-API-2019 + MalbehavD-V1 + Carpenter benign (GitHub / GitHub / Kaggle)</td>
+        <td>9,778 combined pre-dedup (7,107 + 2,570 + 101)</td>
+        <td>80% grouped-stratified by (source,label)</td>
+        <td>10% (val+test combined = 1,835 rows, 274 benign)</td>
+        <td>10%</td>
+      </tr>
+      <tr>
+        <td>Memory</td>
+        <td>CIC-MalMem-2022 (public research; Kaggle mirror used)</td>
+        <td>58,596 rows, 55 VolMemLyzer features</td>
+        <td>46,736 (benign 23,438 / malware 23,298)</td>
+        <td>5,930 (2,930 / 3,000)</td>
+        <td>5,930 (2,930 / 3,000)</td>
+      </tr>
+      <tr>
+        <td>Network</td>
+        <td>CSE-CIC-IDS2018 (explicit redistribution licence; AWS Open Data)</td>
+        <td>16,233,002 raw → 2,000,000 capped → 1,951,671 after excluding 48,329 ambiguous</td>
+        <td>1,526,757 (78.23%; benign 1,286,894 / mal 239,863)</td>
+        <td>211,697 (10.85%; 160,864 / 50,833)</td>
+        <td>213,217 (10.92%; 160,869 / 52,348)</td>
+      </tr>
+      <tr>
+        <td>Emulation</td>
+        <td>Quo Vadis / <code>dtrizna/quovadis-speakeasy</code> (Apache-2.0, verified)</td>
+        <td>92,700 files (75,298 Jan-2022 train / 17,402 Apr-2022 test); module_entry rows only, exact-dup sequences collapsed per era</td>
+        <td>6,070 unique sequences (benign 4,044 / mal 2,026)</td>
+        <td>675 (450 / 225)</td>
+        <td>2,495 (1,936 / 559)</td>
+      </tr>
+    </tbody>
+  </table>
+  <p class="small">Leakage invariants verified: Static 0 train/test hash overlap; Behavioral 0 sequences span &gt;1 split
+  (85 fixed); Memory 0/32,106 sample-id groups and 0/58,596 duplicate feature-vector hashes span &gt;1 split; Network 0
+  duplicate groups span both labels (post-exclusion) and 0 hashes span &gt;1 split (1,591,298 unique vectors); Emulation
+  every split 100% unique sequences, 0 train/val overlap, <code>duplicate_count</code> sums back to pre-collapse totals.</p>
+
+  <h3>D. Model architecture &amp; hyperparameter reference</h3>
+  <table>
+    <thead><tr><th>Signal</th><th>Architecture</th><th>Key hyperparameters</th><th>Calibration</th><th>ONNX</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>Static</td>
+        <td>LightGBM GBDT over 2568-dim / 12-group EMBER2024-compatible feature vector</td>
+        <td><code>num_leaves=255</code>, <code>max_depth=15</code>, <code>learning_rate=0.03</code>, <code>min_child_samples=50</code>, <code>is_unbalance=True</code>, 2,996 rounds</td>
+        <td>Platt (<code>LogisticRegression</code>), merged into ONNX graph</td>
+        <td>61.4 MB; max abs diff 0.0032 on 10k rows; 0 verdict diffs; no INT8</td>
+      </tr>
+      <tr>
+        <td>Behavioral</td>
+        <td>Embedding + learned positional emb → conv stack 128→256→128→128 (k=3,5,7,3, BN+dropout 0.3) → 4-head self-attention (residual+LayerNorm) → global pool → sigmoid</td>
+        <td>seq len 100, <code>embed_dim=128</code> (CLI default; 64 optional), AdamW, cosine restarts, early stop; 18 epochs</td>
+        <td>None — raw sigmoid</td>
+        <td>0.36 MB class (prior impl); INT8 restricted to MatMul/Gemm; legacy exporter forced</td>
+      </tr>
+      <tr>
+        <td>Memory</td>
+        <td>LightGBM GBDT over 55 raw VolMemLyzer + 7 derived ratio features (62 total)</td>
+        <td><code>num_leaves=31</code>, <code>max_depth=-1</code>, <code>learning_rate=0.05</code>, <code>min_child_samples=20</code>, <code>is_unbalance</code> omitted (≈50/50), best iter 71</td>
+        <td>Platt, merged into ONNX graph</td>
+        <td>mean abs err 6.7e-9, max 2.0e-6 on 5,930 rows; 0 mismatches; no INT8</td>
+      </tr>
+      <tr>
+        <td>Network</td>
+        <td>LightGBM GBDT over 78 CICFlowMeter flow features (mirrors Static/Memory shape; not an autoencoder hybrid)</td>
+        <td><code>num_leaves=31</code>, <code>max_depth=-1</code>, <code>learning_rate=0.05</code>, <code>min_child_samples=20</code>, <code>is_unbalance=True</code> (≈5.4:1), 760 iters</td>
+        <td>Platt, merged into ONNX graph</td>
+        <td>mean abs err 2.1e-4, <b>max 0.5465</b> (float64→float32 TreeEnsemble spec limit); 3/213,217 flips at threshold; shipped as final</td>
+      </tr>
+      <tr>
+        <td>Emulation</td>
+        <td>Behavioral-family 1D-CNN + 4-head self-attention (<code>emulation_cnn.py</code>); not the reference GRU/opcode design</td>
+        <td>vocab 3,154 (train-only), seq len 500, <code>embed_dim=64</code>, <code>dropout=0.4</code>, <code>batch_size=64</code>, 777,345 params; val-AUC early stop + AUC-gap overfit monitor</td>
+        <td>None — raw sigmoid</td>
+        <td>None (deferred until the model is worth shipping)</td>
+      </tr>
+    </tbody>
+  </table>
+  <p class="small"><b>Static feature groups (sum 2568):</b> general 7, histogram 256, byteentropy 256, strings 177,
+  header 74, section 224, imports 1282, exports 129, datadirectories 34, richheader 33, authenticode 8,
+  pefilewarnings 88.</p>
+
+  <h3>E. Config &amp; source references</h3>
+  <ul class="small">
+    <li><b>Decision logic:</b> <code>inference/policy_engine.py</code> — <code>decide()</code>, verdict enums, threshold constants (with full derivation comments).</li>
+    <li><b>Scan pipeline:</b> <code>inference/pipeline.py</code> — <code>CortexPipeline.scan()</code>, <code>_validate_path()</code>, <code>_run_memory()</code>, <code>_run_behavioral()</code>, <code>to_security_event()</code>.</li>
+    <li><b>Thresholds mirror:</b> <code>config/thresholds.yaml</code> — <code>static</code>, <code>behavioral</code>, <code>memory</code>, <code>network</code>, <code>emulation</code>, <code>sequence</code>, <code>file</code> blocks.</li>
+    <li><b>Features:</b> <code>features/pe_features.py</code> (2568-dim, 12 groups), <code>features/memory_features.py</code> (7 derived + train-only scaler), <code>features/ember2024_adapter.py</code>.</li>
+    <li><b>Models:</b> <code>models/static_lgbm.py</code>, <code>models/memory_lgbm.py</code>, <code>models/network_lgbm.py</code>, <code>models/behavioral_cnn.py</code> + <code>train_behavioral.py</code>, <code>models/emulation_cnn.py</code> + <code>train_emulation.py</code>.</li>
+    <li><b>Data acquisition:</b> <code>data/download_ember2024.py</code>, <code>download_memory.py</code>, <code>download_network.py</code>, <code>download_emulation.py</code>, <code>download_behavioral.py</code>.</li>
+    <li><b>Splits:</b> <code>scripts/split_behavioral.py</code>, <code>split_memory.py</code>, <code>split_network.py</code>, <code>split_emulation.py</code>.</li>
+    <li><b>Export:</b> <code>export/export_onnx.py</code>, <code>export/quantize.py</code>.</li>
+    <li><b>Narrative sources:</b> <code>PROJECT_HISTORY_REPORT.md</code> (Era 3 + STEP 3), <code>README.md</code> (Cortex-Memory / Cortex-Network / Cortex-Emulation sections, "Known gap" and "Open items").</li>
+  </ul>
+
+  <hr style="margin-top:18pt; border:none; border-top:1pt solid #d0d7de;">
+  <p class="small">Report compiled 2026-08-27 from the <code>cortex-ml</code> repository at commit <code>9331159</code>
+  plus the uncommitted <code>signify</code> 0.9.x fix and documentation updates. All metrics, thresholds, split counts,
+  and limitations are quoted directly from <code>PROJECT_HISTORY_REPORT.md</code>, <code>README.md</code>,
+  <code>inference/policy_engine.py</code>, <code>inference/pipeline.py</code>, and <code>config/thresholds.yaml</code>.</p>
+</div>
+
+</body>
+</html>
