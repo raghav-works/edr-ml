@@ -24,10 +24,13 @@ flowchart TD
     P -->|valid| H[Read bytes and calculate SHA-256]
     H --> PE{Valid Windows PE?}
     PE -->|no| SE
-    PE -->|yes| FE[PE feature extractor: 2,568 float32 features]
+    PE -->|yes| AL{Known-file allowlist: NSRL hash or trusted Authenticode chain?}
+    AL -->|match| SA[Static ALLOW directly; ML scoring skipped]
+    AL -->|no match| FE[PE feature extractor: 2,568 float32 features]
     FE --> SM[Static LightGBM + Platt calibration]
     SM --> SV[Static ALLOW / ALERT / BLOCK]
     SV --> BT{API trace supplied?}
+    SA --> BT
     BT -->|yes| TOK[Validate JSON list; tokenize first 100 calls]
     TOK -->|0-9 calls| BP[Behavioral PENDING]
     TOK -->|10+ calls| BM[1D-CNN + attention]
@@ -36,16 +39,32 @@ flowchart TD
     SE --> BN
 
     SV --> POL[Policy engine]
+    SA --> POL
     BV --> POL
     BP --> POL
     BN --> POL
     MV --> POL
     NV --> POL
-    POL --> R[ScanResult]
+    POL --> R1{1. Behavioral MALICIOUS?}
+    R1 -->|yes| FT[TERMINATE]
+    R1 -->|no| R2{2. Static BLOCK and memory or network MALICIOUS?}
+    R2 -->|yes| FB[BLOCK]
+    R2 -->|no| R3{3. Memory or network MALICIOUS?}
+    R3 -->|yes| FA[ALERT]
+    R3 -->|no| R4{4. Static ALERT or uncorroborated BLOCK?}
+    R4 -->|yes| FA
+    R4 -->|no| R5{5. Any signal ERROR?}
+    R5 -->|yes| FN[NEEDS_REVIEW]
+    R5 -->|no| FL[ALLOW]
+    FT --> R[ScanResult]
+    FB --> R
+    FA --> R
+    FN --> R
+    FL --> R
     R --> E[Security event: result + UTC timestamp + correlation UUID]
 ```
 
-Memory and network scoring happen first and are not contingent on a valid file. That permits a caller to report fileless/injected activity or a network-only event. The PE/static/behavioral branch stops after a static error. Behavioral does run after static `ALLOW`, `ALERT`, or `BLOCK`; static block is not an early return.
+Memory and network scoring happen first and are not contingent on a valid file. That permits a caller to report fileless/injected activity or a network-only event. The PE/static/behavioral branch stops after a static error. Behavioral does run after static `ALLOW` (whether ML-derived or from the known-file allowlist), `ALERT`, or `BLOCK`; static block is not an early return.
 
 ### Reading the flow in plain language
 
@@ -53,11 +72,8 @@ The pipeline accepts a file and, when available, three additional evidence
 sources: an API-call trace, memory features, and network-flow features. Each
 model produces its own score and verdict. The final stage does **not** average
 those scores; it applies safety-oriented priority rules to the verdicts.
-
-![Cortex-ML runtime flow diagram](CORTEX_RUNTIME_FLOW.svg)
-
-The SVG above is the rendered version of the flow. The Mermaid source below
-is kept as editable documentation.
+A step-by-step text walkthrough of the same flow is in
+`docs/Cortex_ML_Complete_Flow.txt`.
 
 ```mermaid
 flowchart TD
@@ -75,7 +91,9 @@ flowchart TD
     C -->|Yes| F[Read file and calculate SHA-256]
     F --> G{Windows PE executable?}
     G -->|No| E
-    G -->|Yes| H[Extract 2,568 PE features]
+    G -->|Yes| AL{Known-file allowlist match?}
+    AL -->|Yes| J
+    AL -->|No| H[Extract 2,568 PE features]
     H --> I[Static LightGBM model]
     I --> J[Static: ALLOW / ALERT / BLOCK]
 
@@ -91,13 +109,13 @@ flowchart TD
     L --> D
     P --> D
     S --> D
-    D --> T[Final: ALLOW / NEEDS_REVIEW / ALERT / TERMINATE]
+    D --> T[Final: ALLOW / NEEDS_REVIEW / ALERT / BLOCK / TERMINATE]
     T --> U[Security event: scores, verdicts, reasons, timestamp]
 ```
 
 | Evidence | What it looks at | Policy effect when malicious |
 |---|---|---|
-| Static | executable structure: headers, imports, sections, strings, signatures | `ALERT` (a static `BLOCK` is currently capped to `ALERT`) |
+| Static | executable structure: headers, imports, sections, strings, signatures | `ALERT`; a static `BLOCK` reaches final `BLOCK` only when memory or network is also `MALICIOUS` on the same scan, otherwise it is capped to `ALERT` |
 | Behavioral | ordered Windows API calls made by the program | `TERMINATE` |
 | Memory | caller-supplied memory-snapshot forensic features | `ALERT` |
 | Network | caller-supplied network-flow statistics | `ALERT` |
@@ -125,6 +143,15 @@ There is no live traffic capture, memory-dump extraction, API instrumentation, m
 ### Cortex-Static: PE-file model
 
 `features/pe_features.py` checks whether bytes parse as a Windows PE. For valid PEs, `PEFeatureExtractor` creates a fixed 2,568-element float32 vector from file size, byte and entropy histograms, strings, PE header, sections, imports, exports, data directories, Rich header, Authenticode signature, and PE-format warnings. `features/ember2024_adapter.py` converts the same grouped-feature shape from EMBER2024 records for offline training.
+
+#### Known-file allowlist (before ML scoring)
+
+After PE validation and before feature extraction, `CortexPipeline._check_allowlist()` runs two independent rule-based checks, either one sufficient:
+
+1. **NSRL hash match** — the file's SHA-256 against a sorted digest artifact built offline by `data/download_nsrl.py` and loaded by `features/nsrl_allowlist.py::NSRLAllowlist`. Only active when the pipeline is constructed with `nsrl_allowlist=`; with no artifact configured this leg is skipped. Reason code `static_allowlisted_nsrl`.
+2. **Authenticode chain verification** to a genuinely trusted root (`features/authenticode_trust.py::verify_trusted_chain`) — real chain verification, not the presence-only Authenticode ML feature. Needs no external artifact and is always attempted. Reason code `static_allowlisted_authenticode_chain`.
+
+A match sets `static_verdict = ALLOW` directly and skips feature extraction, LightGBM scoring, and the feature-degradation check for that file; `static_score` and `degraded_groups` stay empty. It bypasses **only** static's own judgment: memory and network have already run, and behavioral's gate includes `ALLOW`, so a supplied API trace is still scored — a signed, allowlisted binary can still be abused at runtime. Neither check ever raises; any internal failure is treated as no match, so static's normal ML path is the fallback.
 
 A feature group that fails extraction is **reported, not silently zero-filled** (review item 6). `feature_vector_with_report()` returns the list of degraded groups; `PEFeatureExtractor.self_test()` runs the extractor against a bundled known-good signed PE and `CortexPipeline(self_test=True)` (the default) raises at construction if a critical group is broken — the class of regression where a `pefile`/`signify` API change silently disables a group. `CRITICAL_FEATURE_GROUPS` names the nine groups (`general`, `histogram`, `byteentropy`, `strings`, `header`, `section`, `imports`, `datadirectories`, `authenticode`) whose all-zero fill fabricates or erases a primary maliciousness signal; the three excluded (`exports`, `richheader`, `pefilewarnings`) are the ones where all-zero is also a common legitimate value.
 
@@ -156,13 +183,13 @@ These values load at import time from `config/thresholds.yaml`, the single sourc
 
 Offline data contains 55 VolMemLyzer columns. `features/memory_features.py` adds seven deterministic forensic ratios: callbacks, service drivers, file/mutant handles, process hiding, hidden DLLs, and injection rate. That makes 62 features. The deployed tree path uses those raw-plus-derived values directly; the included scaler is for a possible future non-tree model and is not used by this LightGBM model.
 
-At runtime the caller supplies an already ordered 62-value vector. `MemoryLGBMModel` emits `MALICIOUS` at `>= 0.0006464189644018`, else `BENIGN`. A supplied vector with no configured model remains `NOT_PROVIDED` (neutral) and is flagged `signal_health["memory"] = "model_not_configured"`; a scoring exception becomes `ERROR` (→ `NEEDS_REVIEW`) and is flagged `signal_health["memory"] = "model_error"`. Network behaves identically. Behavioral does **not** yet follow this convention — an unconfigured behavioral model returns `ERROR`, not `NOT_PROVIDED` (see OPEN_ITEMS.md).
+At runtime the caller supplies an already ordered 62-value vector. `MemoryLGBMModel` emits `MALICIOUS` at `>= 0.0024964628`, else `BENIGN`. A supplied vector with no configured model remains `NOT_PROVIDED` (neutral) and is flagged `signal_health["memory"] = "model_not_configured"`; a scoring exception becomes `ERROR` (→ `NEEDS_REVIEW`) and is flagged `signal_health["memory"] = "model_error"`. Network and behavioral behave identically: an unconfigured behavioral model or tokenizer also yields `NOT_PROVIDED`, not `ERROR`.
 
 Architecture choice: the reference design used a deep residual MLP for this signal; Cortex-Memory uses LightGBM. The features are ~55–70 engineered numeric statistics — tabular data, the same class as Cortex-Static — and at roughly 58K rows a deep network needs far more data to beat gradient-boosted trees on that kind of input, so the MLP would add complexity for no expected gain. Reusing the already-working Cortex-Static LightGBM pipeline also kept a second model architecture off the debugging surface.
 
 ### Cortex-Network: supplied flow features
 
-`data/download_network.py` defines the canonical 78 CICFlowMeter-compatible columns after removing identity-like fields such as flow ID, source IP, source port, and destination IP. Runtime does not derive them; the caller supplies the ordered vector. `NetworkLGBMModel` emits `MALICIOUS` at `>= 0.5883628015255921`, else `BENIGN`.
+`data/download_network.py` defines the canonical 78 CICFlowMeter-compatible columns after removing identity-like fields such as flow ID, source IP, source port, and destination IP. Runtime does not derive them; the caller supplies the ordered vector. `NetworkLGBMModel` emits `MALICIOUS` at `>= 0.6672636218`, else `BENIGN`.
 
 Architecture choice: the reference design used an autoencoder + classifier hybrid for this signal; Cortex-Network uses LightGBM, for two reasons found before any code was written. The reference repository's own checked-in metrics file reported `anomaly_auc: 0.062` for that autoencoder — a value that low is a visible sign the design was not working even in the implementation it came from. And the flow features are 78 engineered per-flow statistics, i.e. tabular, so LightGBM is the simpler, better-justified default; the autoencoder hybrid stays a legitimate future capability, not a starting point.
 
@@ -178,16 +205,19 @@ It has a threshold and `EmulationVerdict` helper, but `pipeline.scan()`, `ScanRe
 
 Scores are never averaged. `inference/policy_engine.py::decide()` uses this first-match priority:
 
-1. Behavioral `MALICIOUS` → `TERMINATE`.
-2. Memory `MALICIOUS` → `ALERT`.
-3. Network `MALICIOUS` → `ALERT`.
-4. Static `ALERT` or `BLOCK` → `ALERT`.
-5. Any static, behavioral, memory, or network `ERROR` → `NEEDS_REVIEW`.
-6. Otherwise → `ALLOW`.
+1. Behavioral `MALICIOUS` → `TERMINATE` (`behavioral_malicious`).
+2. Static `BLOCK` **and** memory or network `MALICIOUS` on the same scan → `BLOCK` (`static_block_corroborated`, plus `memory_malicious` / `network_malicious` naming the corroborator).
+3. Memory `MALICIOUS` → `ALERT` (`memory_malicious`).
+4. Network `MALICIOUS` → `ALERT` (`network_malicious`).
+5. Static `ALERT` → `ALERT` (`static_alert`), or uncorroborated static `BLOCK` → `ALERT` (`static_block_capped_at_alert`).
+6. Any static, behavioral, memory, or network `ERROR` → `NEEDS_REVIEW`.
+7. Otherwise → `ALLOW`.
 
-Static `BLOCK` is intentionally interim-capped to final `ALERT`, while the static verdict remains `BLOCK` for audit and adds `static_block_capped_at_alert`. Memory and network are also capped at alert. Therefore `FinalDecision.BLOCK` exists in the enum but is not currently returned; only behavioral maliciousness can produce `TERMINATE`.
+Static `BLOCK` is interim-capped: on its own it demotes to final `ALERT` (rung 5), while the static verdict stays `BLOCK` for audit. It reaches final `BLOCK` only through rung 2, when an independent memory or network `MALICIOUS` corroborates it on the same scan. Rung 2 is checked before rungs 3–4 so a corroborated `BLOCK` is not pre-empted by the corroborator's own `ALERT` rung. Corroboration unlocks only static's own `BLOCK`: memory and network on their own never exceed `ALERT`, and a static `ALERT` plus memory/network `MALICIOUS` is still `ALERT`. Only behavioral maliciousness can produce `TERMINATE`.
 
-`NEEDS_REVIEW` (review item 9) separates "the analyzer could not reach a verdict" from "the analyzer found something suspicious". A non-PE / missing / unreadable / oversized file, or an exception during feature extraction or scoring, no longer produces a malware `ALERT` — it produces `NEEDS_REVIEW`, which callers should route to a human / review queue (not treat as lower urgency than `ALERT`, only as a separate stream). A signal that *did* complete with a finding (rungs 1–4) always outranks another signal's failure — positive evidence beats absence of evidence — so `decide(static=ERROR, behavioral=MALICIOUS)` is still `TERMINATE`. The failed-signal reason code (`static_scan_error`, `behavioral_scan_error`, `memory_scan_error`, `network_scan_error`) is retained in `reason_codes` regardless of which rung drives the outcome. Item 10 (model availability as a system-health signal) and item 6 (feature-extraction `degraded_groups`) both layer on top of this state: a degraded **critical** feature group makes `pipeline.scan()` set `static_verdict = ERROR` (→ `NEEDS_REVIEW`) with reason `static_features_degraded` — but only *after* the behavioral gate, so a caller-supplied API trace still runs and a completed behavioral `MALICIOUS` still wins.
+Whenever two or more of {static `ALERT`/`BLOCK`, memory `MALICIOUS`, network `MALICIOUS`} are true on the same scan, the reason codes also gain `corroborated_multi_signal`, whichever rung decides. This flag is audit-only and never changes the outcome; behavioral is not a corroboration input.
+
+`NEEDS_REVIEW` (review item 9) separates "the analyzer could not reach a verdict" from "the analyzer found something suspicious". A non-PE / missing / unreadable / oversized file, or an exception during feature extraction or scoring, no longer produces a malware `ALERT` — it produces `NEEDS_REVIEW`, which callers should route to a human / review queue (not treat as lower urgency than `ALERT`, only as a separate stream). A signal that *did* complete with a finding (rungs 1–5) always outranks another signal's failure — positive evidence beats absence of evidence — so `decide(static=ERROR, behavioral=MALICIOUS)` is still `TERMINATE`. The failed-signal reason code (`static_scan_error`, `behavioral_scan_error`, `memory_scan_error`, `network_scan_error`) is retained in `reason_codes` regardless of which rung drives the outcome. Item 10 (model availability as a system-health signal) and item 6 (feature-extraction `degraded_groups`) both layer on top of this state: a degraded **critical** feature group makes `pipeline.scan()` set `static_verdict = ERROR` (→ `NEEDS_REVIEW`) with reason `static_features_degraded` — but only *after* the behavioral gate, so a caller-supplied API trace still runs and a completed behavioral `MALICIOUS` still wins.
 
 The result contains the path, SHA-256 when bytes were read, all four score/verdict pairs, final decision, reason codes, `signal_health`, and `degraded_groups`. `to_security_event()` adds an ISO-8601 UTC timestamp and a fresh correlation UUID.
 

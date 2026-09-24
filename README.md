@@ -171,30 +171,37 @@ benchmark_latency("data/models/cortex_behavioral_int8.onnx")
 ```
 
 ## Thresholds
-Hard-coded in `inference/policy_engine.py` (mirrored in
-`config/thresholds.yaml`), re-derived against the models actually trained in
-this repo (not carried over from the prior project's placeholder values):
-- static score `< 0.6163460957` → ALLOW, `< 0.9950119117` → ALERT, else BLOCK
-  (`models.static_lgbm.find_threshold_for_fpr()` against `cortex_static`'s
-  calibrated test-set probabilities; BLOCK hits the architecture doc's
-  max_fpr@0.1% bar, ALLOW uses target_fpr=0.01 -- see the code comments in
-  `policy_engine.py`/`thresholds.yaml` for the full derivation).
+`config/thresholds.yaml` is the single source of truth: `inference/policy_engine.py`
+loads it once at import time and fails loudly if it is missing, malformed, or
+missing a required key. Edit thresholds there, not in Python. Every value was
+re-derived against the models actually trained in this repo (not carried over
+from the prior project's placeholder values), and `thresholds.yaml` records
+each derivation plus the superseded values:
+- static score `< 0.4789517595186417` → ALLOW, `< 0.9811748406902472` → ALERT,
+  else BLOCK (2026-09-21 split-discipline retrain:
+  `models.static_lgbm.find_threshold_for_fpr()` on `cortex_static`'s
+  calibrated `cal`-split probabilities alone, with `test` read once afterwards;
+  ALLOW at target_fpr=0.01, BLOCK at target_fpr=0.0005. A static BLOCK verdict
+  is capped to a final ALERT unless memory or network corroborates it. See
+  `thresholds.yaml` and `reports/static_retrain_20260921/` for the full
+  derivation).
 - behavioral score `>= 0.60` → MALICIOUS, else BENIGN (a threshold sweep
   against `cortex_behavioral_best.pt`'s val+test scores, not a precise FPR
   target -- 274 benign samples can't support one. See the known-limitation
   note below.)
-- memory score `>= 0.0005358335957155212` → MALICIOUS, else BENIGN
-  (`models.memory_lgbm.find_threshold_for_fpr()` at target_fpr=0.01 against
-  `cortex_memory`'s calibrated val+test-combined probabilities, 5,860
-  benign samples -- see "Training results and the separability finding"
-  above for the full sweep table and why this specific target was chosen).
+- memory score `>= 0.0024964628` → MALICIOUS, else BENIGN
+  (`models.memory_lgbm.find_threshold_for_fpr()` at target_fpr=0.01 on
+  `cortex_memory`'s calibrated `cal`-split probabilities alone, 5,860 benign
+  samples, re-derived 2026-09-10 -- see "Training results and the
+  separability finding" above for why this specific target was chosen).
   Unlike static/behavioral, memory's MALICIOUS verdict is capped at ALERT
   in the policy engine regardless of score, not wired to BLOCK/TERMINATE --
   see the "Known limitation (memory authority)" note above.
-- network score `>= 0.9441855970306654` → MALICIOUS, else BENIGN
+- network score `>= 0.6672636218` → MALICIOUS, else BENIGN
   (`find_threshold_for_fpr()` at target_fpr=0.001 on `cortex_network`'s
-  calibrated val+test-combined probabilities). Also capped at ALERT — see
-  the Cortex-Network section.
+  calibrated `cal`-split probabilities alone, 160,863 benign samples,
+  re-derived 2026-09-10). Also capped at ALERT — see the Cortex-Network
+  section.
 - emulation score `>= 0.999358594417572` → MALICIOUS, else BENIGN
   (target_fpr=1% sweep point against `cortex_emulation_best.pt`).
   **Logging/telemetry only** — Cortex-Emulation is not in `decide()` at all
@@ -492,7 +499,9 @@ one false positive on the combined set moves the observed FPR by only
 | 5.00% | 0.000446 | 4.744% | 278 / 5,860 | 100.00% |
 
 Chosen: **target_fpr=1% → MEMORY_MALICIOUS_MIN=0.0005358335957155212**
-(`inference/policy_engine.py`) — the best-supported target among those
+(*superseded 2026-09-10: re-derived at the same target on a dedicated `cal`
+split as `0.0024964628`, now in `config/thresholds.yaml` -- see "Thresholds"
+above; this paragraph records the original derivation*) — the best-supported target among those
 tried (55 observed FPs, vs. only 5 at 0.1% — too few to trust) that also
 costs nothing in recall, since detection is already 100% at this and every
 looser target tried. **Test-set metrics at this threshold:** AUC-ROC=1.0,
@@ -711,7 +720,10 @@ multi-feature pattern learning.
 statistical power than memory's 5,860 or behavioral's 274 (one false
 positive moves the observed FPR by only ~0.0003%), so FPR targets well
 below 0.1% are defensible here without the small-sample caution applied to
-those two. Chosen: **target_fpr=0.001 (0.1%) → NETWORK_MALICIOUS_MIN=0.9441855970306654**.
+those two. Chosen: **target_fpr=0.001 (0.1%) → NETWORK_MALICIOUS_MIN=0.9441855970306654**
+(*superseded 2026-09-10: re-derived at the same target on a dedicated `cal`
+split as `0.6672636218`, now in `config/thresholds.yaml` -- see "Thresholds"
+above; this paragraph records the original derivation*).
 **Test-set metrics at this threshold**: AUC-ROC=0.9972, AUC-PR=0.9951,
 precision=0.9969, recall=0.9752, F1=0.9859, FPR=0.098%.
 

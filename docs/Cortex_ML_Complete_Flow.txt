@@ -1,0 +1,591 @@
+Cortex-ML: Complete Flow from Start to Final Decision
+(as implemented today in inference/pipeline.py and inference/policy_engine.py)
+
+┌───────────────────────────────────────────────────────────────┐
+│ 1. CALLER INPUT                                               │
+│                                                               │
+│ CortexPipeline.scan() takes one required argument and three   │
+│ optional ones:                                                │
+│                                                               │
+│ • file_path              (required)                           │
+│ • api_calls_json_path    (optional) - ordered Windows API-call│
+│                            names, JSON list of strings        │
+│ • memory_features        (optional) - 62-value vector         │
+│ • network_features       (optional) - 78-value vector         │
+│                                                               │
+│ There is no live file, memory-dump, or traffic capture in this│
+│ repository. All three optional inputs are supplied by an      │
+│ external process (sandbox, VolMemLyzer-style dumper,          │
+│ CICFlowMeter-compatible collector); the pipeline only scores  │
+│ what it is given.                                             │
+└──────────────────────────────┬────────────────────────────────┘
+                               │
+                               ▼
+┌───────────────────────────────────────────────────────────────┐
+│ 2. MEMORY AND NETWORK SCORING (RUN FIRST, INDEPENDENTLY)      │
+│                                                               │
+│ Memory and network are scored before any file validation and  │
+│ are NOT gated behind a valid file or a static verdict. This is│
+│ deliberate: memory exists to catch injected/fileless activity,│
+│ and network exists to catch C2/exfil traffic, and both threat │
+│ classes can occur with no on-disk file for static to see.     │
+│                                                               │
+│ memory_features supplied?                                     │
+│    ├── no model configured  → memory verdict = NOT_PROVIDED   │
+│    ├── model raises          → memory verdict = ERROR         │
+│    └── model scores it       → Memory LightGBM (62 features)  │
+│                                    score >= 0.0024964628      │
+│                                       → MALICIOUS             │
+│                                    else → BENIGN              │
+│                                                               │
+│ network_features supplied?                                    │
+│    ├── no model configured  → network verdict = NOT_PROVIDED  │
+│    ├── model raises          → network verdict = ERROR        │
+│    └── model scores it       → Network LightGBM (78 features) │
+│                                    score >= 0.6672636218      │
+│                                       → MALICIOUS             │
+│                                    else → BENIGN              │
+│                                                               │
+│ Neither verdict is final on its own. Both feed the policy     │
+│ engine in step 8, capped at ALERT (see step 8).               │
+└──────────────────────────────┬────────────────────────────────┘
+                               │
+                               ▼
+┌───────────────────────────────────────────────────────────────┐
+│ 3. BASIC PATH VALIDATION                                      │
+│                                                               │
+│ • Does the path exist?                                        │
+│ • Is it a regular file (not a folder)?                        │
+│ • Can the scanner stat/read it?                               │
+│ • Is its size 100 MiB or less?                                │
+└──────────────────────────────┬────────────────────────────────┘
+                 ┌─────────────┴─────────────┐
+                 │                           │
+           Validation passes            Validation fails
+                  │                           │
+                  ▼                           ▼
+           continue to step 4          static_verdict = ERROR
+                                        reason: path_not_found /
+                                        not_a_file / unreadable /
+                                        file_too_large
+                                                │
+                                                ▼
+                                        go straight to step 8
+                                        (policy engine)
+
+A file that vanishes or becomes unreadable between this check and
+the actual read (a TOCTOU race) is caught separately and also
+produces static_verdict = ERROR, reason "unreadable" - never an
+unhandled exception with no result at all.
+
+Static-analysis branch
+Path validation passes
+          │
+          ▼
+┌───────────────────────────────────────────────────────────────┐
+│ 4. WINDOWS PE VALIDATION                                      │
+│                                                               │
+│ The scanner reads the real file bytes, computes SHA-256, and  │
+│ tries to parse the Windows Portable Executable structure.     │
+│                                                               │
+│ It checks structures such as:                                 │
+│ • MZ header                                                   │
+│ • PE header                                                   │
+│ • Machine architecture                                        │
+│ • Optional header                                             │
+│ • Sections                                                    │
+│ • Imports and exports                                         │
+│                                                               │
+│ This is rule-based validation, not an ML prediction.          │
+└──────────────────────────────┬────────────────────────────────┘
+                 ┌─────────────┴─────────────┐
+                 │                           │
+           Valid Windows PE            Invalid / non-PE file
+                  │                           │
+                  ▼                           ▼
+           continue to step 5          static_verdict = ERROR
+                                        reason: invalid_or_non_pe_file
+                                                │
+                                                ▼
+                                        go straight to step 8
+
+A PDF, image, text file, or Linux ELF file never receives a normal
+maliciousness score. It fails PE validation, same as the reference
+design, and produces ERROR rather than a fabricated ALLOW.
+
+Static-analysis branch, continued
+Valid Windows PE file
+          │
+          ▼
+┌───────────────────────────────────────────────────────────────┐
+│ 5. KNOWN-FILE ALLOWLIST (rule-based, runs before ML scoring)  │
+│                                                               │
+│ Two independent checks, either one sufficient:                │
+│ • SHA-256 match against a loaded NSRL hash-set                │
+│ • Authenticode chain verification to a genuinely trusted root │
+│   (real chain verification, not the presence-only Authenticode│
+│   ML feature used in step 6)                                  │
+│                                                               │
+│ A match sets static_verdict = ALLOW directly and skips feature│
+│ extraction and LightGBM scoring for this file entirely.       │
+└──────────────────────────────┬────────────────────────────────┘
+                 ┌─────────────┴─────────────┐
+                 │                           │
+              Match found                No match
+                  │                           │
+                  ▼                           ▼
+        static_verdict = ALLOW          continue to step 6
+        (skip steps 6-7)
+        Behavioral/memory/network
+        still run exactly as usual -
+        this bypasses ONLY static's
+        own ML judgment. A signed,
+        allowlisted binary can still
+        be abused at runtime (DLL
+        injection, process hollowing,
+        living-off-the-land) - that is
+        exactly what the other three
+        signals exist to catch.
+
+No allowlist match
+          │
+          ▼
+┌───────────────────────────────────────────────────────────────┐
+│ 6. STATIC FEATURE EXTRACTION                                  │
+│                                                               │
+│ Convert the PE file into 2,568 numerical features:            │
+│                                                               │
+│ • Byte histogram                                              │
+│ • Entropy                                                     │
+│ • Strings                                                     │
+│ • PE headers                                                  │
+│ • Sections                                                    │
+│ • Imports                                                     │
+│ • Exports                                                     │
+│ • Data directories                                            │
+│ • Rich header                                                 │
+│ • Authenticode information                                    │
+│ • PE parser warnings                                          │
+│                                                               │
+│ A feature group that fails to extract is REPORTED, not        │
+│ silently zero-filled. If a CRITICAL group is degraded         │
+│ (general, histogram, byteentropy, strings, header, section,   │
+│ imports, datadirectories, authenticode - the nine groups whose│
+│ all-zero fill would fabricate or erase a primary maliciousness│
+│ signal), the resulting score cannot be trusted; that is handled│
+│ in step 7b, after behavioral has had its chance to run.       │
+└──────────────────────────────┬────────────────────────────────┘
+                               │
+                               ▼
+                  2,568-dimensional float32 vector
+                               │
+                               ▼
+┌───────────────────────────────────────────────────────────────┐
+│ 7. CORTEX-STATIC LIGHTGBM MODEL + PLATT CALIBRATION           │
+│                                                               │
+│ Input:  2,568 numerical features                              │
+│ Output: calibrated static maliciousness score, 0 to 1         │
+└──────────────────────────────┬────────────────────────────────┘
+                               │
+                               ▼
+Static verdict selection (config/thresholds.yaml, single source
+of truth - loaded once at process start)
+
+Static score
+    │
+    ├── < 0.4789517595186417
+    │        └── Static verdict = ALLOW
+    │
+    ├── >= 0.4789517595186417 and < 0.9811748406902472
+    │        └── Static verdict = ALERT
+    │
+    └── >= 0.9811748406902472
+             └── Static verdict = BLOCK  (see step 8 - this is
+                 interim-capped, not an autonomous final BLOCK)
+
+Examples:
+Static score 0.30  → ALLOW
+Static score 0.80  → ALERT
+Static score 0.995 → BLOCK (verdict), demoted to final ALERT
+                      unless corroborated by memory or network
+                      (step 8)
+
+What happens after static scoring?
+Static verdict
+      │
+      ├── ERROR  → skip behavioral entirely, go to step 8
+      │
+      └── ALLOW / ALERT / BLOCK
+             └── proceed to behavioral analysis if a trace was
+                 supplied (step 7a). Unlike the earlier design,
+                 BLOCK does NOT stop here: a file scoring above
+                 the block threshold still gets full behavioral
+                 scrutiny, because behavioral MALICIOUS is the one
+                 signal that can still escalate a BLOCK-scoring
+                 file to TERMINATE, and skipping behavioral on the
+                 highest-scoring files would give them LESS
+                 scrutiny than a borderline ALERT file gets.
+
+Behavioral-analysis branch
+┌───────────────────────────────────────────────────────────────┐
+│ 7a. BEHAVIORAL INPUT AND TOKENIZATION                         │
+│                                                               │
+│ Current input: path to a JSON file containing an ordered list │
+│ of Windows API-call names.                                    │
+│                                                               │
+│ Example JSON:                                                 │
+│ ["OpenProcess","VirtualAllocEx","WriteProcessMemory",         │
+│  "CreateRemoteThread"]                                        │
+│                                                               │
+│ Read JSON → validate it is a list of strings → convert each   │
+│ name to a token ID (unknown names become <UNK>) → keep the    │
+│ first 100 calls.                                              │
+└──────────────────────────────┬────────────────────────────────┘
+                               │
+                               ▼
+Sequence-length gate
+
+0 real calls
+    └── Behavioral verdict = PENDING  (empty sequence)
+
+1-9 real calls
+    └── Behavioral verdict = PENDING  (below this length the model
+        is non-discriminative: val+test AUC 0.66, 0 of 4 malicious
+        sequences detected - PENDING is the honest answer, not a
+        limitation)
+
+10-99 real calls
+    └── Score the zero-padded sequence. The verdict is used, but
+        a "behavioral_short_trace" reason code is attached, because
+        short-trace benign coverage rests almost entirely on one
+        training dataset.
+
+Exactly 100 real calls
+    └── Score all 100 calls normally.
+
+More than 100 real calls
+    └── Score only the first 100. Remaining calls are ignored.
+
+No behavioral_model or tokenizer configured
+    └── Behavioral verdict = NOT_PROVIDED (neutral - a config gap,
+        not a scan failure)
+
+Behavioral model
+┌───────────────────────────────────────────────────────────────┐
+│ 7b. CORTEX-BEHAVIORAL 1D-CNN + SELF-ATTENTION MODEL           │
+│                                                               │
+│ Input:  100 numerical API token IDs                           │
+│ Architecture: embedding + learned positions, four 1D-conv     │
+│ blocks (kernels 3/5/7/3), four-head self-attention, global    │
+│ average pooling, binary-logit head, then sigmoid.             │
+│ Output: behavioral maliciousness score, 0 to 1                │
+└──────────────────────────────┬────────────────────────────────┘
+                               │
+                               ▼
+Behavioral verdict selection
+Behavioral score
+       │
+       ├── < 0.60
+       │       └── Behavioral verdict = BENIGN
+       │
+       └── >= 0.60
+               └── Behavioral verdict = MALICIOUS
+
+Examples:
+Behavioral score 0.50  → BENIGN
+Behavioral score 0.59  → BENIGN
+Behavioral score 0.60  → MALICIOUS
+
+The behavioral model does not produce ALERT or TERMINATE directly.
+It produces only BENIGN or MALICIOUS. Only the policy engine turns
+a MALICIOUS behavioral verdict into a final TERMINATE decision.
+
+Static feature-degradation override (runs AFTER behavioral, on
+purpose - a degraded static extraction must never suppress a
+caller-supplied API trace, and a completed behavioral MALICIOUS on
+the same file still wins in the policy engine regardless of what
+happens here):
+
+    any CRITICAL feature group degraded in step 6?
+         │
+         ├── yes → static_verdict is set aside → ERROR
+         │         reason: static_features_degraded
+         │         (routes toward NEEDS_REVIEW, step 8)
+         │
+         └── no  → static_verdict from step 7 stands
+
+signal_health bookkeeping (kept separate from the verdicts
+themselves): a configured memory/network model that raised an
+exception records "model_error"; features supplied with no model
+wired records "model_not_configured" (deliberately neutral - it
+does not push the scan toward NEEDS_REVIEW); a degraded static
+feature group records "degraded" and lists which group(s) in
+degraded_groups.
+
+Policy-engine flow
+
+The four scores are never averaged.
+
+Static verdict        Behavioral verdict     Memory verdict     Network verdict
+ALLOW/ALERT/BLOCK/     NOT_PROVIDED/PENDING/  NOT_PROVIDED/      NOT_PROVIDED/
+ERROR                  BENIGN/MALICIOUS/      BENIGN/MALICIOUS/  BENIGN/MALICIOUS/
+                       ERROR                  ERROR              ERROR
+     │                        │                    │                    │
+     └────────────┬───────────┴──────────┬─────────┴──────────┬─────────┘
+                  ▼                      ▼                    ▼
+                              POLICY ENGINE (inference/policy_engine.py::decide)
+
+┌───────────────────────────────────────────────────────────────┐
+│ 8. FINAL DECISION LOGIC (first match wins - a strict priority │
+│    chain, not a blend)                                        │
+└───────────────────────────────────────────────────────────────┘
+
+1. Is the behavioral verdict MALICIOUS?
+       │
+       ├── Yes → Final decision = TERMINATE
+       │
+       └── No
+             ▼
+2. Is the static verdict BLOCK, AND is it corroborated by memory
+   MALICIOUS or network MALICIOUS on the same scan?
+       │
+       ├── Yes → Final decision = BLOCK
+       │         (a static-only BLOCK, with no corroborating
+       │         signal, can NEVER reach this branch - it always
+       │         demotes to ALERT at step 4 below. Corroboration
+       │         only unlocks BLOCK; it never lets memory's or
+       │         network's own authority exceed ALERT.)
+       │
+       └── No
+             ▼
+3. Is the memory verdict MALICIOUS?
+       │
+       ├── Yes → Final decision = ALERT
+       │
+       └── No
+             ▼
+3b. Is the network verdict MALICIOUS?
+       │
+       ├── Yes → Final decision = ALERT
+       │
+       └── No
+             ▼
+4. Is the static verdict ALERT, or BLOCK (uncorroborated)?
+       │
+       ├── Yes → Final decision = ALERT
+       │         (reason code distinguishes "static_alert" from
+       │         "static_block_capped_at_alert")
+       │
+       └── No
+             ▼
+5. Did any signal (static / behavioral / memory / network) end
+   in ERROR - i.e. could not be analyzed at all?
+       │
+       ├── Yes → Final decision = NEEDS_REVIEW
+       │         ("cannot analyze" is not a malware finding, so
+       │         this is a separate review queue, not a quieter
+       │         ALERT)
+       │
+       └── No
+             ▼
+6. Otherwise
+       └── Final decision = ALLOW
+           reason: no_malicious_evidence
+
+Corroboration flag (audit trail only, never changes the outcome
+above): whenever 2 or more of {static ALERT/BLOCK, memory
+MALICIOUS, network MALICIOUS} are true on the same scan, the
+reason codes gain "corroborated_multi_signal". This never fires
+from behavioral alone and never widens memory's or network's own
+ceiling past ALERT except through rung 2 above.
+
+Complete decision table (uncorroborated case; add corroboration
+where noted)
+┌───────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                           │
+│Static result   Behavioral   Memory       Network      Final decision                      │ 
+│                                                                                           │ 
+│ALLOW           NOT_PROVIDED BENIGN/NP    BENIGN/NP    ALLOW                               │
+│ALLOW           PENDING      BENIGN/NP    BENIGN/NP    ALLOW                               │
+│ALLOW           BENIGN       BENIGN/NP    BENIGN/NP    ALLOW                               │
+│ALLOW           any ERROR, none MALICIOUS              NEEDS_REVIEW                        │
+│ALLOW           MALICIOUS    any          any          TERMINATE                           │
+│ALERT           NOT_PROVIDED any          any          ALERT                               │
+│ALERT           BENIGN       any          any          ALERT                               │
+│ALERT           MALICIOUS    any          any          TERMINATE                           │
+│BLOCK           not MAL      BENIGN/NP    BENIGN/NP    ALERT (capped)                      │
+│BLOCK           not MAL      MALICIOUS    any          BLOCK (corroborated)                │
+│BLOCK           not MAL      any          MALICIOUS    BLOCK (corroborated)                │
+│BLOCK           MALICIOUS    any          any          TERMINATE                           │
+│any             any          MALICIOUS    -            ALERT (unless a                     │
+│                                                          higher rung fired)               │
+│any             any          -            MALICIOUS    ALERT (unless a                     │
+│                                                          higher rung fired)               │
+│ERROR           -            -            -            NEEDS_REVIEW, unless                │
+│                                                          behavioral MALICIOUS             │
+│                                                          fires first                      │
+│                                                          (TERMINATE) - a                  │
+│                                                          completed positive               │
+│                                                          finding always                   │
+│                                                          outranks a                       │
+│                                                          different signal's               │
+│                                                          failure                          │
+└───────────────────────────────────────────────────────────────────────────────────────────┘                                                                                         │
+Because behavioral has uncapped authority and static BLOCK is
+capped by default:
+
+Static BLOCK + Behavioral BENIGN, no corroboration → ALERT
+Static BLOCK + Behavioral MALICIOUS                → TERMINATE
+Static BLOCK + Memory MALICIOUS (corroborated)      → BLOCK
+Static BLOCK + Behavioral ERROR, no corroboration   → ALERT
+
+Final output
+Final policy decision
+          │
+          ▼
+┌────────────────────────────────────────────────────────────────────┐
+│ 9. STRUCTURED JSON SECURITY EVENT (ScanResult.to_security_event)   │
+│                                                                    │
+│ Contains:                                                          │
+│ • File path                                                        │
+│ • SHA-256 (when bytes were read)                                   │
+│ • Static score and verdict                                         │
+│ • Behavioral score and verdict                                     │
+│ • Memory score and verdict                                         │
+│ • Network score and verdict                                        │
+│ • Final policy decision                                            │
+│ • Reason codes (which rung fired, corroboration, any ERROR codes)  │
+│ • degraded_groups (any static feature groups that were zero-filled)│
+│ • signal_health (model_error / model_not_configured / degraded,    │
+│   kept separate from the security verdict)                         │
+│ • ISO-8601 UTC timestamp                                           │
+│ • Correlation UUID                                                 │
+└────────────────────────────────────────────────────────────────────┘
+
+Possible final decisions are:
+
+ALLOW         → no active supplied signal produced malicious
+                evidence (does not prove every kind of evidence
+                was available)
+NEEDS_REVIEW  → at least one signal could not be analyzed, and
+                nothing else found malicious/suspicious evidence -
+                a review queue, not a malware alert
+ALERT         → suspicious static/memory/network evidence, or a
+                scanner failure needing review
+BLOCK         → a static score at/above the block threshold,
+                corroborated by memory or network MALICIOUS on the
+                same scan (the enum value exists for the
+                uncorroborated case too, but that case is currently
+                always demoted to ALERT - see step 8, rung 2 and 4)
+TERMINATE     → the behavioral model identified malicious API
+                activity
+
+Currently, these are only JSON decisions. The package does not
+actually allow, block, quarantine, or terminate anything at the
+operating-system level.
+
+Not part of the runtime decision: Cortex-Emulation
+
+A fifth model, Cortex-Emulation, is trained and evaluated
+(Speakeasy/Quo Vadis traces, same CNN+attention family as
+behavioral, first 500 tokenized API calls, threshold
+0.999358594417572) but is deliberately never wired into decide().
+Its verdict is computed for telemetry and later analysis only,
+because a Jan-2022-to-Apr-2022 temporal concept-drift ablation
+showed its malicious recall collapsing from roughly 71% to roughly
+42% on the later collection period - not stable enough to carry
+even ALERT authority yet.
+
+End-to-end architecture in one flow
+
+Caller supplies file_path + optional API trace + optional memory
+and network vectors
+        │
+        ├── Memory features → Memory LightGBM → BENIGN/MALICIOUS/
+        │                      NOT_PROVIDED/ERROR  ─┐
+        ├── Network features → Network LightGBM → BENIGN/MALICIOUS/
+        │                      NOT_PROVIDED/ERROR  ─┤
+        │                                            │
+        ▼                                            │
+Path, permission and size validation                 │
+        │                                            │
+        ├── invalid → static ERROR ──────────────────┤
+        ▼                                            │
+Rule-based Windows PE validation                     │
+        │                                            │
+        ├── invalid/non-PE → static ERROR ───────────┤
+        ▼                                            │
+SHA-256 + known-file allowlist (NSRL / Authenticode   │
+chain) → match: static ALLOW, skip ML scoring         │
+        │ no match                                    │
+        ▼                                              │
+Extract 2,568 static features (degraded groups         │
+reported, not silently zeroed)                          │
+        │                                                │
+        ▼                                                 │
+LightGBM + Platt calibration → static score               │
+        │                                                  │
+        ▼                                                   │
+ALLOW / ALERT / BLOCK  (BLOCK is interim-capped, see below)  │
+        │                                                     │
+        ▼                                                      │
+API-call JSON supplied? → validate + tokenize, first 100 calls │
+        │                                                        │
+        ├── 0-9 real calls → behavioral PENDING                  │
+        ├── 10-99 real calls → 1D-CNN+attention (short-trace flag)│
+        ├── 100+ real calls → 1D-CNN+attention (first 100 scored)│
+        ▼                                                        │
+BENIGN / MALICIOUS / PENDING / NOT_PROVIDED                      │
+        │                                                        │
+Critical static feature group degraded? → static verdict → ERROR│
+(checked AFTER behavioral, so a supplied trace still counts)     │
+        │                                                        │
+        ▼                                                        ▼
+                    Policy engine (first match wins, never averaged)
+                              │
+        ├── Behavioral MALICIOUS ────────────────→ TERMINATE
+        ├── Static BLOCK + corroboration ────────→ BLOCK
+        ├── Memory MALICIOUS ────────────────────→ ALERT
+        ├── Network MALICIOUS ───────────────────→ ALERT
+        ├── Static ALERT / uncorroborated BLOCK ─→ ALERT
+        ├── Any signal ERROR ─────────────────────→ NEEDS_REVIEW
+        └── Otherwise ─────────────────────────────→ ALLOW
+                              │
+                              ▼
+        Structured JSON security event (scores, verdicts,
+        reason codes, degraded_groups, signal_health, timestamp,
+        correlation ID)
+
+Team-ready explanation
+
+Cortex-ML scores whatever evidence a caller supplies for a single
+scan: a file path is required, and an API-call trace, a
+memory-snapshot vector, and a network-flow vector are each
+optional. Memory and network are scored first and independently of
+file validity, because their entire purpose is catching
+injected/fileless activity and network-only C2 traffic that has no
+file for static analysis to examine. The file path, if given, goes
+through path validation, PE-structure validation, a rule-based
+known-file allowlist, then 2,568-feature extraction and a
+calibrated LightGBM model that yields ALLOW, ALERT, or BLOCK.
+Unless static scanning itself failed, a supplied API-call trace is
+then tokenized and scored by a 1D-CNN with self-attention, yielding
+BENIGN, MALICIOUS, or PENDING for short traces. None of the four
+scores are averaged. A single priority chain decides the outcome:
+behavioral MALICIOUS always wins and yields TERMINATE; a static
+BLOCK only becomes a final BLOCK when corroborated by a MALICIOUS
+memory or network verdict on the same scan, and otherwise demotes
+to ALERT, because static's own evidence has a documented
+false-positive pattern that a second, independent, positive signal
+is required to override; memory and network MALICIOUS verdicts are
+each capped at ALERT on their own, reflecting how narrow and
+lab-collected their validation data still is; and any signal that
+could not be analyzed at all - rather than one that produced a
+suspicious finding - routes to a separate NEEDS_REVIEW queue instead
+of being reported as a malware ALERT. A fifth model, Cortex-
+Emulation, is trained and scored for telemetry but is intentionally
+excluded from this decision because of observed accuracy collapse
+across collection periods. The result is a structured JSON security
+event with every score, verdict, reason code, and health flag
+recorded; live telemetry collection and actual OS-level blocking,
+quarantine, or process termination are not yet implemented.

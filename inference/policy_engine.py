@@ -2,8 +2,9 @@
 Policy engine — sequential-gate decision logic.
 
 Exactly reproduces the architecture: static and behavioral scores are never
-averaged/ensembled. Static runs first; only a static ALLOW allows the file to
-proceed to behavioral analysis. Final decision is rule-priority, not blended.
+averaged/ensembled. Static runs first; a static ALLOW, ALERT, or BLOCK lets
+the file proceed to behavioral analysis -- only a static ERROR skips it.
+Final decision is rule-priority, not blended.
 """
 
 from __future__ import annotations
