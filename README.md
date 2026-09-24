@@ -1,4 +1,4 @@
-# PhantomCortex (cortex-ml) — Five-Signal Windows Malware Detection
+# Cortex (edr-ml) — Five-Signal Windows Malware Detection
 
 ## 1. Introduction
 
