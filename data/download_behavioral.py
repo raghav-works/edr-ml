@@ -57,7 +57,7 @@ not repeated at runtime):
     tokens are present on both malicious- and benign-labeled rows, across
     more than one source. (The other 8 of the 9 non-matching tokens were
     not re-checked; this correction is scoped to the two sentinel tokens
-    only.) See README.md's "Known limitation (behavioral sentinel tokens)"
+    only.) See docs/TECHNICAL_NOTES.md's "Known limitation (behavioral sentinel tokens)"
     section for the resulting dataset-shortcut investigation and its
     outcome (no fix applied; aggregate dependence across the test split is
     low, but two individual rows show real per-row dependence on a single

@@ -45,7 +45,7 @@ multiple splits, since nothing in this dataset's schema lets us tell two
 independently-genuine benign captures apart from two captures of the exact
 same underlying system state. The exact-duplicate feature-vector hash check
 below catches only *exact* duplicates, not near-duplicates -- see the
-README's Known Limitations section.
+docs/TECHNICAL_NOTES.md's Known Limitations section.
 
 After splitting, every row's feature vector is hashed and checked for exact
 duplicates spanning more than one split (`verify_zero_duplicate_feature_hashes`),

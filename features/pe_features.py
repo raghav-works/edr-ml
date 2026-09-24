@@ -590,7 +590,7 @@ class ExportsInfo(FeatureGroup):
         # export COUNT (matches ImportsInfo / RichHeader / PEFormatWarnings,
         # which all prepend a real count). len(h) was always 128 -- the
         # FeatureHasher width -- i.e. a dead constant feature slot.
-        # TODO(feature-parity test, README open item #1): the parity test
+        # TODO(feature-parity test, TECHNICAL_NOTES.md open item #1): the parity test
         # MUST assert this slot (absolute index feature_2276) == len(export
         # names) on BOTH the live-PE path here AND the EMBER2024 adapter path
         # (features/ember2024_adapter.py). Correctness on the adapter side

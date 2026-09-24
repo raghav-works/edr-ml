@@ -37,7 +37,7 @@ optional (present only when the emulator observed that activity):
 `handled_exceptions`, `registry_access`, `file_access`, `dropped_files`,
 `network_events`, `process_events`.
 
-v1 scope (see README's Cortex-Emulation section for the full reasoning):
+v1 scope (see docs/TECHNICAL_NOTES.md's Cortex-Emulation section for the full reasoning):
 only `api_name` tokens from `apis` are extracted for modeling, matching
 Cortex-Behavioral's proven 1D-CNN + self-attention architecture. Every
 other field -- the args/ret_val/pc detail inside `apis`, and the sparse

@@ -189,7 +189,7 @@ def export_memory_lgbm_to_onnx(model_path: str, output_path: str, num_features: 
     *calibrated* probability -- exactly what MemoryLGBMModel.predict_proba()
     returns, matching what inference/policy_engine.py's MEMORY_MALICIOUS_MIN
     was derived against. Verified against the real cortex_memory model and
-    the actual CIC-MalMem-2022 test split -- see the README's ONNX export
+    the actual CIC-MalMem-2022 test split -- see docs/TECHNICAL_NOTES.md's ONNX export
     section for the measured max/mean absolute error.
     """
     import onnx
@@ -316,7 +316,7 @@ def export_network_lgbm_to_onnx(model_path: str, output_path: str, num_features:
     *calibrated* probability -- exactly what NetworkLGBMModel.predict_proba()
     returns, matching what inference/policy_engine.py's NETWORK_MALICIOUS_MIN
     was derived against. Verified against the real cortex_network model and
-    the actual CSE-CIC-IDS2018 test split -- see the README's ONNX export
+    the actual CSE-CIC-IDS2018 test split -- see docs/TECHNICAL_NOTES.md's ONNX export
     section for the measured max/mean absolute error.
     """
     import onnx

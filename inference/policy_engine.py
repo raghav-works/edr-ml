@@ -144,7 +144,7 @@ BEHAVIORAL_MALICIOUS_MIN = _thr(_THRESHOLDS, "behavioral", "malicious_at_or_abov
 # executions. A large fraction of the model's features are individually
 # near-separating on this data (the prior pass measured 22 of 62 above 0.95
 # AUC on their own, on both train and held-out data -- a property of the
-# dataset, not of any one trained model; the README's separability table is
+# dataset, not of any one trained model; docs/TECHNICAL_NOTES.md's separability table is
 # the reference). The model may be learning "does this look like that one
 # baseline VM," not "is malicious behavior present" -- a distinction this
 # dataset alone cannot resolve. This is exactly why memory's authority
@@ -216,7 +216,7 @@ NETWORK_MALICIOUS_MIN: Optional[float] = _thr(_THRESHOLDS, "network", "malicious
 # the target_fpr=1% point from the val+test sweep against the trained e64
 # checkpoint (data/models/cortex_emulation_best.pt): threshold 0.999358594,
 # ~24 expected FP on 2,386 combined benign, ~50% pooled detection. See the
-# README's "Cortex-Emulation" section for the full sweep table.
+# docs/TECHNICAL_NOTES.md's "Cortex-Emulation" section for the full sweep table.
 #
 # Cortex-Emulation is deliberately NOT wired into decide()'s priority chain
 # (grep: there is no `emulation_verdict ==` branch below, by design).
@@ -232,7 +232,7 @@ NETWORK_MALICIOUS_MIN: Optional[float] = _thr(_THRESHOLDS, "network", "malicious
 # a lookup table, cannot carry autonomous OR ALERT authority yet. Use this
 # constant to record an EmulationVerdict alongside a scan for later
 # analysis; do not branch policy on it. Revisit only with a materially
-# different model (see the README's future-work note: engineered
+# different model (see docs/TECHNICAL_NOTES.md's future-work note: engineered
 # behavioural-category features, or training data spanning more collection
 # dates -- not further hyperparameter tuning, which the ablation ruled out).
 EMULATION_MALICIOUS_MIN: Optional[float] = _thr(_THRESHOLDS, "emulation", "malicious_at_or_above")
@@ -459,7 +459,7 @@ def decide(
     Removal criteria (ALL required):
     - the pe_features.py feature-parity test exists and passes against a
       reference extractor (thrember) on real PEs incl. a signed binary
-      (README open item #1); AND
+      (TECHNICAL_NOTES.md open item #1); AND
     - the residual pe_features.py-vs-thrember skew is closed (open item #2);
       AND
     - Cortex-Static is re-validated on a real-world confirmed-label file set
@@ -542,7 +542,7 @@ def decide(
     file (see BEHAVIORAL_MALICIOUS_MIN's comment above): don't extend a
     model's authority past what its validation evidence actually supports.
     Revisit this cap once real-world injected-process validation data exists
-    for memory -- flagged as an open item in the README. The trained
+    for memory -- flagged as an open item in docs/TECHNICAL_NOTES.md. The trained
     model's own held-out test performance reinforces keeping this cap
     rather than raising it: 22 of its 62 features individually separate
     the classes with >0.95 AUC, consistent with CIC-MalMem-2022's benign

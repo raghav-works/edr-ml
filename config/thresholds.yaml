@@ -135,7 +135,7 @@
 # sample is a repeated capture of one baseline Windows 10 VM, and a large
 # fraction of features are individually near-separating on this data (the
 # prior pass measured 22 of 62 above 0.95 AUC -- a dataset property, not a
-# per-model artifact; README's "Training results and the separability
+# per-model artifact; docs/TECHNICAL_NOTES.md's "Training results and the separability
 # finding" section is the reference). malicious_at_or_above only computes
 # MemoryVerdict, and that verdict is policy-capped at ALERT
 # (inference/policy_engine.py::decide()), never BLOCK/TERMINATE: the split-
@@ -167,7 +167,7 @@
 # models "nearly perfect" on CSE-CIC-IDS2018 -- which this one is -- degrade
 # toward random on external traffic. Per-attack-type table now in
 # scripts/evaluate_all_models.py's output; that plus ~7.5% documented label
-# noise in the README's Cortex-Network section.
+# noise in docs/TECHNICAL_NOTES.md's Cortex-Network section.
 
 static:
   allow_below: 0.4789517595186417      # score <  this -> ALLOW   (superseded: 0.5471026402140103, pre-calibration-fix: 0.6163460957)
@@ -193,7 +193,7 @@ network:
 # embed_dim=64, 68.0% -> 38.3% at embed_dim=32 -- unchanged by capacity
 # reduction) and only ~+3-4 pp test accuracy over a trivial train-sequence
 # duplicate-lookup baseline. Full sweep table + drift diagnostic in the
-# README's "Cortex-Emulation" section.
+# docs/TECHNICAL_NOTES.md's "Cortex-Emulation" section.
 emulation:
   malicious_at_or_above: 0.999358594417572  # telemetry EmulationVerdict only; never reaches decide()
 
