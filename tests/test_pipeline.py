@@ -24,6 +24,7 @@ End-to-end pipeline coverage for:
 from __future__ import annotations
 
 import hashlib
+import math
 import os
 
 import numpy as np
@@ -492,3 +493,85 @@ def test_allowlist_hit_does_not_suppress_behavioral_malicious(tmp_path):
     # behavioral alone gives ALERT -- not suppressed, but not TERMINATE.
     assert result.final_decision == FinalDecision.ALERT
     assert "behavioral_malicious_uncorroborated" in result.reason_codes
+
+
+# --------------------------------------------------------------------------
+# docs/CODE_REVIEW.md F12 / F13 -- non-finite scores and PENDING, end to end
+
+class _ConstStaticModel:
+    def __init__(self, value):
+        self.value = value
+
+    def predict_proba(self, X, *_args, **_kwargs):
+        return np.full(len(X), self.value, dtype=np.float64)
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")],
+                         ids=["nan", "+inf", "-inf"])
+def test_non_finite_static_score_is_needs_review(value):
+    result = _pipe(static_model=_ConstStaticModel(value)).scan(_VALID_PE)
+    assert result.static_verdict == StaticVerdict.ERROR
+    assert result.final_decision == FinalDecision.NEEDS_REVIEW
+    assert "static_scan_error" in result.reason_codes
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")],
+                         ids=["nan", "+inf", "-inf"])
+def test_non_finite_memory_and_network_scores_are_error(value):
+    pipe = _pipe(static_model=_BenignStaticModel(),
+                 memory_model=_ConstStaticModel(value),
+                 network_model=_ConstStaticModel(value))
+    result = pipe.scan(_VALID_PE, memory_features=_MEMORY_FEATURES,
+                       network_features=_NETWORK_FEATURES)
+    assert result.memory_verdict == MemoryVerdict.ERROR
+    assert result.network_verdict == NetworkVerdict.ERROR
+    assert result.final_decision == FinalDecision.NEEDS_REVIEW
+
+
+@pytest.mark.parametrize("logit", [float("nan"), float("inf"), float("-inf")],
+                         ids=["nan", "+inf", "-inf"])
+def test_non_finite_behavioral_score_is_error(tmp_path, logit):
+    import torch
+
+    class _ConstBehavioral:
+        def __call__(self, x):
+            return torch.tensor([logit])
+
+    class _OkTokenizer:
+        def encode(self, calls):
+            return np.zeros(100, dtype=np.int64), "ok"
+
+    trace = tmp_path / "trace.json"
+    trace.write_text('["NtCreateFile", "NtWriteFile"]')
+    pipe = _pipe(static_model=_BenignStaticModel(),
+                 behavioral_model=_ConstBehavioral(), tokenizer=_OkTokenizer())
+    result = pipe.scan(_VALID_PE, api_calls_json_path=str(trace))
+    if math.isnan(logit):
+        # sigmoid(nan) = nan -> ERROR -> NEEDS_REVIEW
+        assert result.behavioral_verdict == BehavioralVerdict.ERROR
+        assert result.final_decision == FinalDecision.NEEDS_REVIEW
+    else:
+        # sigmoid(+-inf) is the finite 1.0 / 0.0: a legitimate extreme score
+        expected = BehavioralVerdict.MALICIOUS if logit > 0 else BehavioralVerdict.BENIGN
+        assert result.behavioral_verdict == expected
+
+
+def test_behavioral_pending_with_static_allow_is_allow_unverified(tmp_path):
+    class _ShortTokenizer:
+        def encode(self, calls):
+            return np.zeros(100, dtype=np.int64), "too_short"
+
+    class _UnusedBehavioral:
+        def __call__(self, x):  # pragma: no cover - must not run on PENDING
+            raise AssertionError("behavioral model scored a PENDING trace")
+
+    trace = tmp_path / "trace.json"
+    trace.write_text('["NtCreateFile", "NtWriteFile"]')
+    pipe = _pipe(static_model=_BenignStaticModel(),
+                 behavioral_model=_UnusedBehavioral(), tokenizer=_ShortTokenizer())
+    result = pipe.scan(_VALID_PE, api_calls_json_path=str(trace))
+    assert result.static_verdict == StaticVerdict.ALLOW
+    assert result.behavioral_verdict == BehavioralVerdict.PENDING
+    assert result.final_decision == FinalDecision.ALLOW_UNVERIFIED
+    assert "behavioral_pending_unverified" in result.reason_codes
+    assert result.to_dict()["final_decision"] == "ALLOW_UNVERIFIED"

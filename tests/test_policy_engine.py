@@ -45,7 +45,8 @@ NN = N.NOT_PROVIDED
 CASES = [
     ((S.ALLOW, B.BENIGN, NM, NN), F.ALLOW, "no_malicious_evidence"),
     ((S.ALLOW, B.NOT_PROVIDED, NM, NN), F.ALLOW, "no_malicious_evidence"),
-    ((S.ALLOW, B.PENDING, NM, NN), F.ALLOW, "no_malicious_evidence"),
+    # F13: a requested-but-PENDING behavioral check is not a clean pass.
+    ((S.ALLOW, B.PENDING, NM, NN), F.ALLOW_UNVERIFIED, "behavioral_pending_unverified"),
 
     # item 2: static BLOCK is interim-capped to ALERT (uncorroborated) and
     # must NOT pre-empt behavioral.
@@ -463,6 +464,7 @@ def test_module_thresholds_match_yaml():
     assert NETWORK_MALICIOUS_MIN == y["network"]["malicious_at_or_above"]
     assert EMULATION_MALICIOUS_MIN == y["emulation"]["malicious_at_or_above"]
     assert pe.BEHAVIORAL_TERMINATE_REQUIRES_CORROBORATION is y["behavioral"]["terminate_requires_corroboration"]
+    assert pe.BEHAVIORAL_PENDING_DECISION == y["behavioral"]["pending_with_static_allow"]
 
 
 def test_static_thresholds_are_ordered():
@@ -496,3 +498,84 @@ def test_load_thresholds_fails_loudly(tmp_path, monkeypatch):
     monkeypatch.setattr(pe, "_THRESHOLDS_PATH", lst)
     with pytest.raises(RuntimeError, match="mapping"):
         pe._load_thresholds()
+
+
+# ------------------------------------------------- F12: non-finite scores -> ERROR
+_NON_FINITE = [float("nan"), float("inf"), float("-inf")]
+
+
+@pytest.mark.parametrize("score", _NON_FINITE, ids=["nan", "+inf", "-inf"])
+@pytest.mark.parametrize("fn,error", [
+    (static_verdict_from_score, S.ERROR),
+    (behavioral_verdict_from_score, B.ERROR),
+    (memory_verdict_from_score, M.ERROR),
+    (network_verdict_from_score, N.ERROR),
+    (emulation_verdict_from_score, EmulationVerdict.ERROR),
+], ids=["static", "behavioral", "memory", "network", "emulation"])
+def test_non_finite_score_is_error(fn, error, score):
+    assert fn(score) == error
+
+
+@pytest.mark.parametrize("score", _NON_FINITE, ids=["nan", "+inf", "-inf"])
+def test_non_finite_static_score_never_allows_or_blocks(score):
+    """Through decide(): a broken static score routes to NEEDS_REVIEW."""
+    final, reasons = decide(static_verdict_from_score(score), B.NOT_PROVIDED)
+    assert final == F.NEEDS_REVIEW
+    assert reasons == ["static_scan_error"]
+
+
+def test_finite_extremes_still_score_normally():
+    assert static_verdict_from_score(0.0) == S.ALLOW
+    assert static_verdict_from_score(1.0) == S.BLOCK
+    assert behavioral_verdict_from_score(1.0) == B.MALICIOUS
+
+
+# ------------------------------------------- F13: behavioral PENDING with static ALLOW
+def test_pending_default_is_allow_unverified():
+    assert pe.BEHAVIORAL_PENDING_DECISION == "ALLOW_UNVERIFIED"
+    for m, n in itertools.product((M.NOT_PROVIDED, M.BENIGN), (N.NOT_PROVIDED, N.BENIGN)):
+        final, reasons = decide(S.ALLOW, B.PENDING, m, n)
+        assert final == F.ALLOW_UNVERIFIED
+        assert reasons == ["behavioral_pending_unverified"]
+
+
+def test_pending_does_not_mask_errors_or_findings():
+    assert decide(S.ALLOW, B.PENDING, M.ERROR, NN)[0] == F.NEEDS_REVIEW
+    assert decide(S.ERROR, B.PENDING, NM, NN)[0] == F.NEEDS_REVIEW
+    assert decide(S.ALLOW, B.PENDING, M.MALICIOUS, NN)[0] == F.ALERT
+    assert decide(S.ALERT, B.PENDING, NM, NN)[0] == F.ALERT
+
+
+@pytest.mark.parametrize("choice,expected", [
+    ("NEEDS_REVIEW", F.NEEDS_REVIEW),
+    ("ALLOW", F.ALLOW),
+])
+def test_pending_decision_is_configurable(monkeypatch, choice, expected):
+    monkeypatch.setattr(pe, "BEHAVIORAL_PENDING_DECISION", choice)
+    final, reasons = decide(S.ALLOW, B.PENDING, NM, NN)
+    assert final == expected
+    if choice == "ALLOW":  # legacy
+        assert reasons == ["no_malicious_evidence"]
+
+
+def test_pending_setting_changes_only_static_allow_pending_clean_rows(monkeypatch):
+    new = {v: decide(*v) for v in _ALL}
+    monkeypatch.setattr(pe, "BEHAVIORAL_PENDING_DECISION", "ALLOW")
+    old = {v: decide(*v) for v in _ALL}
+    changed = {v for v in _ALL if new[v] != old[v]}
+    assert changed == {
+        (S.ALLOW, B.PENDING, m, n)
+        for m in (M.NOT_PROVIDED, M.BENIGN) for n in (N.NOT_PROVIDED, N.BENIGN)
+    }
+    for v in changed:
+        assert (old[v][0], new[v][0]) == (F.ALLOW, F.ALLOW_UNVERIFIED)
+
+
+def test_choice_helper_rejects_unknown_values():
+    choices = pe._PENDING_DECISION_CHOICES
+    assert pe._choice({"a": {"b": "NEEDS_REVIEW"}}, choices, "a", "b") == "NEEDS_REVIEW"
+    with pytest.raises(RuntimeError, match="missing required key"):
+        pe._choice({}, choices, "a")
+    for junk in ("allow_unverified", "BLOCK", None, 1):
+        with pytest.raises(RuntimeError, match="must be one of"):
+            pe._choice({"a": junk}, choices, "a")

@@ -264,7 +264,8 @@ The **policy engine** checks these rules in order and returns the first match:
 | 3 | Memory or Network MALICIOUS | **ALERT** |
 | 4 | Static ALERT, or Static BLOCK with no corroboration | **ALERT** |
 | 5 | Any signal ERROR (file could not be analyzed) | **NEEDS_REVIEW** |
-| 6 | Otherwise | **ALLOW** |
+| 6 | Behavioral requested but PENDING (trace too short), Static ALLOW | **ALLOW_UNVERIFIED** (`behavioral_pending_unverified`; set by `behavioral.pending_with_static_allow`) |
+| 7 | Otherwise | **ALLOW** |
 
 > If you retrain a model, its score distribution changes and you must derive its thresholds again.
 

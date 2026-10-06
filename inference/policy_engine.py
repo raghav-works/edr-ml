@@ -10,6 +10,7 @@ Final decision is rule-priority, not blended.
 from __future__ import annotations
 
 import enum
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -129,6 +130,27 @@ BEHAVIORAL_MALICIOUS_MIN = _thr(_THRESHOLDS, "behavioral", "malicious_at_or_abov
 # call time by decide(), so tests can monkeypatch it.
 BEHAVIORAL_TERMINATE_REQUIRES_CORROBORATION = _flag(
     _THRESHOLDS, "behavioral", "terminate_requires_corroboration"
+)
+
+# docs/CODE_REVIEW.md F13: the final decision when static is ALLOW, nothing
+# else is malicious or errored, and behavioral was requested but PENDING.
+# ALLOW reproduces the legacy silent pass.
+_PENDING_DECISION_CHOICES = ("ALLOW_UNVERIFIED", "NEEDS_REVIEW", "ALLOW")
+
+
+def _choice(data: dict, choices: tuple[str, ...], *path: str) -> str:
+    node: object = data
+    for key in path:
+        if not isinstance(node, dict) or key not in node:
+            raise RuntimeError(f"{_THRESHOLDS_PATH} is missing required key: {'.'.join(path)}")
+        node = node[key]
+    if node not in choices:
+        raise RuntimeError(f"{_THRESHOLDS_PATH}:{'.'.join(path)} must be one of {choices}, got {node!r}")
+    return node
+
+
+BEHAVIORAL_PENDING_DECISION = _choice(
+    _THRESHOLDS, _PENDING_DECISION_CHOICES, "behavioral", "pending_with_static_allow"
 )
 
 # Memory threshold -- RE-DERIVED 2026-09-10 by the split-discipline retrain
@@ -296,6 +318,11 @@ class EmulationVerdict(str, enum.Enum):
 
 class FinalDecision(str, enum.Enum):
     ALLOW = "ALLOW"
+    # ALLOW_UNVERIFIED (docs/CODE_REVIEW.md F13): static ALLOW, nothing
+    # malicious anywhere, but a requested behavioral check came back PENDING
+    # (trace too short to score). Not blocked, not queued for a human, but
+    # never reported as a clean ALLOW either.
+    ALLOW_UNVERIFIED = "ALLOW_UNVERIFIED"
     # NEEDS_REVIEW: analysis could not complete for at least one signal
     # (non-PE / missing / unreadable / oversized file, or an exception during
     # feature extraction or scoring) AND no channel that DID complete produced
@@ -308,7 +335,16 @@ class FinalDecision(str, enum.Enum):
     TERMINATE = "TERMINATE"
 
 
+def _non_finite(score: float) -> bool:
+    """docs/CODE_REVIEW.md F12: NaN/inf comparisons are all False, which
+    used to fall through to BLOCK (static) or BENIGN (the others). A
+    non-finite score means the model or its input is broken -> ERROR."""
+    return not math.isfinite(score)
+
+
 def static_verdict_from_score(score: float) -> StaticVerdict:
+    if _non_finite(score):
+        return StaticVerdict.ERROR
     if score < STATIC_ALLOW_MAX:
         return StaticVerdict.ALLOW
     if score < STATIC_BLOCK_MIN:
@@ -317,6 +353,8 @@ def static_verdict_from_score(score: float) -> StaticVerdict:
 
 
 def behavioral_verdict_from_score(score: float) -> BehavioralVerdict:
+    if _non_finite(score):
+        return BehavioralVerdict.ERROR
     return BehavioralVerdict.MALICIOUS if score >= BEHAVIORAL_MALICIOUS_MIN else BehavioralVerdict.BENIGN
 
 
@@ -327,6 +365,8 @@ def memory_verdict_from_score(score: float) -> MemoryVerdict:
             "trained. Train it (scripts/train_memory.py, not yet written) and set "
             "the threshold above before calling this."
         )
+    if _non_finite(score):
+        return MemoryVerdict.ERROR
     return MemoryVerdict.MALICIOUS if score >= MEMORY_MALICIOUS_MIN else MemoryVerdict.BENIGN
 
 
@@ -336,6 +376,8 @@ def network_verdict_from_score(score: float) -> NetworkVerdict:
             "NETWORK_MALICIOUS_MIN has not been derived yet -- train Cortex-Network "
             "(scripts/train_network.py) and set the threshold above before calling this."
         )
+    if _non_finite(score):
+        return NetworkVerdict.ERROR
     return NetworkVerdict.MALICIOUS if score >= NETWORK_MALICIOUS_MIN else NetworkVerdict.BENIGN
 
 
@@ -349,6 +391,8 @@ def emulation_verdict_from_score(score: float) -> EmulationVerdict:
             "EMULATION_MALICIOUS_MIN is unset -- train Cortex-Emulation "
             "(scripts/train_emulation.py) and set the telemetry threshold above."
         )
+    if _non_finite(score):
+        return EmulationVerdict.ERROR
     return EmulationVerdict.MALICIOUS if score >= EMULATION_MALICIOUS_MIN else EmulationVerdict.BENIGN
 
 
@@ -422,7 +466,10 @@ def decide(
                                                          CAPPED to ALERT --
                                                          see below)
         5. any static / behavioral / memory / network ERROR -> NEEDS_REVIEW
-        6. otherwise                 -> ALLOW
+        6. behavioral PENDING        -> BEHAVIORAL_PENDING_DECISION
+                                        (default ALLOW_UNVERIFIED; reason
+                                        behavioral_pending_unverified)
+        7. otherwise                 -> ALLOW
 
     2+ of {static ALERT/BLOCK, memory MALICIOUS, network MALICIOUS} agreeing
     adds a `corroborated_multi_signal` reason code without changing the
@@ -730,5 +777,11 @@ def decide(
         # One or more signals could not be analyzed at all -- route to a
         # human / review queue, NOT the malware-alert stream (review item 9).
         return FinalDecision.NEEDS_REVIEW, reasons
+
+    # F13: reaching here means static is ALLOW (static ERROR would have put a
+    # code in `reasons`). A requested behavioral check that could not score
+    # is not evidence of benignness.
+    if behavioral_verdict == BehavioralVerdict.PENDING and BEHAVIORAL_PENDING_DECISION != "ALLOW":
+        return FinalDecision(BEHAVIORAL_PENDING_DECISION), ["behavioral_pending_unverified"]
 
     return FinalDecision.ALLOW, ["no_malicious_evidence"]
