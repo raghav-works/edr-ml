@@ -57,8 +57,9 @@ Every model is trained offline on its own dataset, has its decision threshold de
                                     ▼
                   ┌───────────────────────────────────┐
                   │           Final Decision          │
-                  │ ALLOW / NEEDS_REVIEW / ALERT /    │
-                  │ BLOCK / TERMINATE + JSON event    │
+                  │ ALLOW / ALLOW_UNVERIFIED /        │
+                  │ NEEDS_REVIEW / ALERT / BLOCK /    │
+                  │ TERMINATE + JSON event            │
                   └───────────────────────────────────┘
 
    Cortex-Emulation (1D-CNN + Attention) runs separately and is logged only.

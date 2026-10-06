@@ -18,7 +18,7 @@ path validation → PE validation → 2568-dim feature extraction → LightGBM
                 (PENDING if < 10 API calls; a 10–99 call verdict is emitted
                  but flagged "behavioral_short_trace")
         → policy engine → final decision
-              (ALLOW / NEEDS_REVIEW / ALERT / BLOCK / TERMINATE)
+              (ALLOW / ALLOW_UNVERIFIED / NEEDS_REVIEW / ALERT / BLOCK / TERMINATE)
         → structured JSON security event
 ```
 
@@ -27,8 +27,15 @@ or an exception during feature extraction or scoring) with no malicious or
 suspicious signal from any other channel resolves to **`NEEDS_REVIEW`**, not
 `ALERT` (review item 9): "could not analyze" is not a malware finding. A signal
 that *did* complete with a finding still wins — `decide(static=ERROR,
-behavioral=MALICIOUS)` is `TERMINATE` — and the failed-signal reason code is
-kept in `reason_codes` regardless.
+behavioral=MALICIOUS)` is `ALERT` (reason `behavioral_malicious_uncorroborated`:
+since `docs/CODE_REVIEW.md` F4, behavioral reaches `TERMINATE` only when static
+is ALERT or BLOCK) — and the failed-signal reason code is kept in
+`reason_codes` regardless.
+
+A static ALLOW whose requested behavioral check came back `PENDING` (trace too
+short to score) resolves to **`ALLOW_UNVERIFIED`**, not a silent `ALLOW`
+(`docs/CODE_REVIEW.md` F13; configurable via
+`behavioral.pending_with_static_allow`).
 
 Model/analyzer health is reported on `ScanResult.signal_health`, kept
 **separate from the security verdict** (review item 10): a configured
