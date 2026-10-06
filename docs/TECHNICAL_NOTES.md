@@ -122,7 +122,7 @@ The script has no `--test` flag: it carves `train`/`val`/`cal` out of the
 training parquet by a seeded permutation (`--val-frac` and `--cal-frac`,
 default 0.1 each), trains on `train`, early-stops on `val`, and fits the Platt
 calibrator on `cal` -- `test` is never read here, only by
-`scripts.evaluate_all_models`. Output is `<out>.lgbm` + `<out>.meta`.
+`scripts.evaluate_all_models`. Output is `<out>.lgbm` + `<out>.meta.json`.
 `scripts/train_static.py::_feature_columns` selects columns named
 `feature_0..feature_2567` (or plain digit strings) and raises unless exactly
 2,568 are found; `_load_train_val` / `_load_cal` stream the parquet row group
@@ -146,8 +146,8 @@ python -m scripts.train_behavioral \
 from export.export_onnx import export_static_lgbm_to_onnx, export_behavioral_checkpoint_to_onnx
 from export.quantize import quantize_behavioral_int8, compare_accuracy, benchmark_latency
 
-# Takes the base model path (LGBMModel.save()'s <path>.lgbm + <path>.meta),
-# not a bare .lgbm path -- the calibrator lives in the .meta file and gets
+# Takes the base model path (LGBMModel.save()'s <path>.lgbm + <path>.meta.json),
+# not a bare .lgbm path -- the calibrator lives in the .meta.json file and gets
 # chained into the ONNX graph itself (see the export_static_lgbm_to_onnx
 # docstring): the exported model's one output IS the Platt-calibrated
 # probability, matching LGBMModel.predict_proba() exactly. Exporting just
@@ -498,7 +498,7 @@ Cortex-Memory variant, where scaling would actually matter.
 `MetricsReport`, `find_threshold_for_fpr()`) + `scripts/train_memory.py`.
 Trained on `memory_train` only; `memory_val` drives early stopping (best
 iteration 71) and Platt calibration; `memory_test` untouched until final
-evaluation. Saved to `data/models/cortex_memory.lgbm` / `.meta`
+evaluation. Saved to `data/models/cortex_memory.lgbm` / `.meta.json`
 (gitignored, like the other trained models).
 
 **Threshold derivation (2026-08-25, seed=42):** benign counts — val=2,930,
@@ -1130,13 +1130,73 @@ A deployment that copies `cortex_behavioral_best.pt` must also copy
 pass the sidecar names. For the shipped checkpoint, fp32 and int8 parity
 against the legacy path is max |Δp| 3.7e-7 for fp32 and 6.6e-3 for int8, with 0 verdict flips.
 
+## Model metadata is JSON, hash-checked (F24)
+The LightGBM `.meta` files and `MemoryFeatureScaler` used to be pickles, and
+unpickling runs arbitrary code. A replaced `.meta` therefore meant code
+execution in the scanner.
+
+**Metadata format**
+- `<base>.meta.json` sits next to `<base>.lgbm`. It is written by
+  `models/lgbm_artifacts.py`.
+- It holds:
+  - `feature_count`, `num_iterations`, `model_hash`;
+  - the Platt calibrator as `coef`, `intercept` and `classes`;
+  - `lgbm_sha256`.
+- Loaders read only JSON. If only a pickle `.meta` exists, loading fails with
+  a message that names the converter.
+
+**Hash checks**
+1. Every load recomputes the `.lgbm` sha256 and compares it with the JSON's
+   `lgbm_sha256`. This catches a replaced or edited model file.
+2. Loads of the deployed models also pass `expected_sha256=` from
+   `config/thresholds.yaml`, using `static`, `memory` or `network` `.model_sha256`
+   (exposed as `policy_engine.*_MODEL_SHA256`). That file is version-controlled
+   and pairs each model with the thresholds derived for it. Writing both
+   `.lgbm` and `.meta.json` defeats check 1 but not check 2.
+3. Where the pin is passed:
+   - It is passed in `scripts/evaluate_all_models.py`,
+     `scripts/verify_onnx_parity.py` and the README scan example.
+   - It is not passed in `scripts/derive_static_thresholds.py` or
+     `export/export_onnx.py`. Those take an arbitrary model path, so they get check 1 only.
+
+**Other changes**
+- `MemoryFeatureScaler.save` and `load` use JSON with `columns`, `mean` and
+  `std`. No scaler file currently exists, because the tree models do not use it.
+- Every `torch.load` passes `weights_only=True`, and a test enforces this
+  across the repo.
+
+**Migration (done 2026-10-06 for our own four files)**
+```
+python -m scripts.convert_model_meta_to_json \
+    --model data/models/cortex_static --model data/models/cortex_memory \
+    --model data/models/cortex_network --model data/models/cortex_static_retrain
+```
+Run it **only on files we produced ourselves**, because it unpickles each
+`.meta` once. Before writing the JSON, it checks that `model_hash` is the
+prefix of the `.lgbm` sha256. After writing, it reloads through the JSON-only
+path and checks that the calibrator is bit-identical.
+
+The old `.meta` pickles are no longer read and can be deleted. Deployments
+must ship `.meta.json` instead.
+
+Regression, pickle loader vs JSON loader (with `weights_only=True` for emulation):
+
+| Rows | Result |
+|---|---|
+| 20,000 static test rows | bit-identical, 0 verdict flips |
+| full memory test split (5,930) | bit-identical, 0 verdict flips |
+| 20,000 network test rows | bit-identical, 0 verdict flips |
+| emulation test traces (2,495) | bit-identical, 0 verdict flips |
+
 ## Running a scan end-to-end
 ```python
 from models.behavioral_artifacts import load_behavioral_model
 from models.static_lgbm import LGBMModel
 from inference.pipeline import CortexPipeline
+from inference.policy_engine import STATIC_MODEL_SHA256
 
-static_model = LGBMModel.load("data/models/cortex_static")
+static_model = LGBMModel.load("data/models/cortex_static",
+                              expected_sha256=STATIC_MODEL_SHA256)  # JSON meta + sha256 pins (F24)
 # Builds the model with the forward pass recorded in the checkpoint's sidecar
 # (cortex_behavioral_best.meta.json) and verifies checkpoint + vocab sha256.
 behavioral_model, tokenizer = load_behavioral_model(

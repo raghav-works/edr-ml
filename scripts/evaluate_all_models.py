@@ -476,7 +476,7 @@ def evaluate_static(limit: Optional[int] = None,
     logger.info("   STATIC_ALLOW_MAX = %.16f", allow_max)
     logger.info("   STATIC_BLOCK_MIN = %.16f", block_min)
 
-    model = LGBMModel.load(STATIC_MODEL)
+    model = LGBMModel.load(STATIC_MODEL, expected_sha256=pe.STATIC_MODEL_SHA256)  # F24 pin
     results = {"thresholds": {"STATIC_ALLOW_MAX": allow_max, "STATIC_BLOCK_MIN": block_min},
                "splits": {}, "prevalence": {}}
 
@@ -542,7 +542,7 @@ def evaluate_memory(limit: Optional[int] = None,
     logger.info("2. CORTEX-MEMORY  (%s.lgbm)", MEMORY_MODEL)
     logger.info("   MEMORY_MALICIOUS_MIN = %.16f  (verdict capped at ALERT in decide())", thr)
 
-    model = MemoryLGBMModel.load(MEMORY_MODEL)
+    model = MemoryLGBMModel.load(MEMORY_MODEL, expected_sha256=pe.MEMORY_MODEL_SHA256)  # F24 pin
     out = {"threshold": thr, "splits": {}, "prevalence": {}}
     for split, path in (("val", MEMORY_VAL), ("test", MEMORY_TEST)):
         X, y = _load_memory_xy(path, limit)
@@ -640,7 +640,7 @@ def evaluate_network(limit: Optional[int] = None,
     logger.info("3. CORTEX-NETWORK  (%s.lgbm)", NETWORK_MODEL)
     logger.info("   NETWORK_MALICIOUS_MIN = %.16f  (verdict capped at ALERT in decide())", thr)
 
-    model = NetworkLGBMModel.load(NETWORK_MODEL)
+    model = NetworkLGBMModel.load(NETWORK_MODEL, expected_sha256=pe.NETWORK_MODEL_SHA256)  # F24 pin
     out = {"threshold": thr, "splits": {}, "prevalence": {}}
     for split, path in (("val", NETWORK_VAL), ("test", NETWORK_TEST)):
         X, y = _load_network_xy(path, limit)
@@ -770,7 +770,8 @@ def evaluate_emulation(limit: Optional[int] = None,
     # e64 checkpoint (config/thresholds.yaml references cortex_emulation_best.pt).
     model = CortexEmulationNet(vocab_size=tokenizer.vocab_size,
                                sequence_length=SEQUENCE_LENGTH, embed_dim=64)
-    model.load_state_dict(torch.load(EMULATION_CKPT, map_location="cpu"))
+    # weights_only: tensors only, no pickled code (docs/CODE_REVIEW.md F24)
+    model.load_state_dict(torch.load(EMULATION_CKPT, map_location="cpu", weights_only=True))
     model.eval()
 
     out = {"threshold": thr, "splits": {}}

@@ -69,6 +69,18 @@ def _flag(data: dict, *path: str) -> bool:
     return node
 
 
+def _sha256(data: dict, *path: str) -> str:
+    """A required sha256 pin: exactly 64 lowercase hex characters."""
+    node: object = data
+    for key in path:
+        if not isinstance(node, dict) or key not in node:
+            raise RuntimeError(f"{_THRESHOLDS_PATH} is missing required key: {'.'.join(path)}")
+        node = node[key]
+    if not (isinstance(node, str) and len(node) == 64 and all(c in "0123456789abcdef" for c in node)):
+        raise RuntimeError(f"{_THRESHOLDS_PATH}:{'.'.join(path)} must be a 64-char lowercase hex sha256, got {node!r}")
+    return node
+
+
 _THRESHOLDS = _load_thresholds()
 
 # Static thresholds are loaded from config/thresholds.yaml (see
@@ -90,6 +102,14 @@ _THRESHOLDS = _load_thresholds()
 # values and says what replaced them.
 STATIC_ALLOW_MAX = _thr(_THRESHOLDS, "static", "allow_below")        # score <  this -> ALLOW
 STATIC_BLOCK_MIN = _thr(_THRESHOLDS, "static", "block_at_or_above")  # score >= this -> BLOCK  (between the two -> ALERT)
+
+# docs/CODE_REVIEW.md F24: the .lgbm sha256 each set of thresholds belongs
+# to. Pass as expected_sha256= when loading the deployed model; a different
+# model file then fails to load instead of being scored against thresholds
+# derived for another booster.
+STATIC_MODEL_SHA256 = _sha256(_THRESHOLDS, "static", "model_sha256")
+MEMORY_MODEL_SHA256 = _sha256(_THRESHOLDS, "memory", "model_sha256")
+NETWORK_MODEL_SHA256 = _sha256(_THRESHOLDS, "network", "model_sha256")
 # INTERIM CAP (2026-09-08): a score >= STATIC_BLOCK_MIN still yields
 # StaticVerdict.BLOCK, but decide() demotes that to a final ALERT (not BLOCK)
 # -- 2/5 confirmed-benign real binaries still cross this line post-

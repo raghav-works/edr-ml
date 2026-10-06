@@ -30,9 +30,9 @@ from scripts.evaluate_all_models import (
 
 _REQUIRED = [
     "config/thresholds.yaml",
-    "data/models/cortex_static.lgbm", "data/models/cortex_static.meta",
-    "data/models/cortex_memory.lgbm", "data/models/cortex_memory.meta",
-    "data/models/cortex_network.lgbm", "data/models/cortex_network.meta",
+    "data/models/cortex_static.lgbm", "data/models/cortex_static.meta.json",
+    "data/models/cortex_memory.lgbm", "data/models/cortex_memory.meta.json",
+    "data/models/cortex_network.lgbm", "data/models/cortex_network.meta.json",
     "data/models/cortex_behavioral_best.pt", "data/models/api_vocab.json",
     "data/processed/ember2024_train.parquet", "data/processed/ember2024_test.parquet",
     "data/processed/memory_val.parquet", "data/processed/memory_test.parquet",

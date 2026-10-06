@@ -5,7 +5,8 @@
 # static.block_at_or_above, behavioral/memory/network/emulation
 # .malicious_at_or_above, behavioral.terminate_requires_corroboration
 # (boolean), behavioral.pending_with_static_allow (choice),
-# behavioral.max_unk_rate); sequence.* and
+# behavioral.max_unk_rate, static/memory/network.model_sha256 (64 lowercase
+# hex chars)); sequence.* and
 # file.* are informational for now
 # (api_tokenizer / pipeline still hold their own constants).
 #
@@ -175,6 +176,12 @@
 static:
   allow_below: 0.4789517595186417      # score <  this -> ALLOW   (superseded: 0.5471026402140103, pre-calibration-fix: 0.6163460957)
   block_at_or_above: 0.9811748406902472  # score >= this -> BLOCK (else ALERT)  (superseded: 0.9798998555119341, pre-fix: 0.9950119117)
+  # docs/CODE_REVIEW.md F24. sha256 of the .lgbm these thresholds were derived
+  # for; loading the deployed model verifies it (LGBMModel.load(...,
+  # expected_sha256=STATIC_MODEL_SHA256)) and fails on a mismatch. Matches
+  # reports/static_retrain_20260921/retrain_sha256.txt. Change it only
+  # together with re-derived thresholds.
+  model_sha256: acfa5a757aa13cd0708c00ca97f445ed86ab54d9a4e80505c7fd733157b02bea
 
 behavioral:
   malicious_at_or_above: 0.60  # score >= this -> MALICIOUS, else BENIGN
@@ -200,9 +207,15 @@ behavioral:
 
 memory:
   malicious_at_or_above: 0.0024964628  # score >= this -> MALICIOUS, else BENIGN (capped at ALERT, never BLOCK/TERMINATE). Derived 2026-09-10 on the new cal split, target_fpr=0.01 (56/5,860 benign FP, detection 0.9993). Superseded: 0.0006464189644018, 0.0005358335957155212
+  # F24 pin, as static.model_sha256. Prefix matches model_hash 483784ad2dd56e6a
+  # in EVAL_ALL_MODELS_RESULTS.txt.
+  model_sha256: 483784ad2dd56e6ae7b61ea409816fc7a65c393be063f1cf8e6749e44c8d9a21
 
 network:
   malicious_at_or_above: 0.6672636218  # score >= this -> MALICIOUS, else BENIGN (capped at ALERT, never BLOCK/TERMINATE). Derived 2026-09-10 on the new cal split, target_fpr=0.001 (159/160,863 benign FP, detection 0.9626). Superseded: 0.5883628015255921, 0.9441855970306654
+  # F24 pin, as static.model_sha256. Prefix matches model_hash bca52bf6a626289e
+  # in EVAL_ALL_MODELS_RESULTS.txt.
+  model_sha256: bca52bf6a626289e16f5390c7f8821f05501b8bd6cfb8446f85975280e7da1a0
 
 # emulation.*: LOGGING / TELEMETRY ONLY -- not a policy input. target_fpr=1%
 # point from the val+test sweep against data/models/cortex_emulation_best.pt

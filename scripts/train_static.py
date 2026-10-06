@@ -226,7 +226,7 @@ def main() -> None:
     gc.collect()
 
     model.save(args.out)
-    logger.info("Saved model to %s.lgbm / %s.meta", args.out, args.out)
+    logger.info("Saved model to %s.lgbm / %s.meta.json", args.out, args.out)
 
 
 if __name__ == "__main__":

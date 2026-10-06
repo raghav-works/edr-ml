@@ -320,8 +320,10 @@ pytest
 from models.behavioral_artifacts import load_behavioral_model
 from models.static_lgbm import LGBMModel
 from inference.pipeline import CortexPipeline
+from inference.policy_engine import STATIC_MODEL_SHA256
 
-static_model = LGBMModel.load("data/models/cortex_static")
+static_model = LGBMModel.load("data/models/cortex_static",
+                              expected_sha256=STATIC_MODEL_SHA256)  # JSON meta + sha256 pins (F24)
 # Builds the model with the forward pass recorded in the checkpoint's sidecar
 # (cortex_behavioral_best.meta.json) and verifies checkpoint + vocab sha256.
 behavioral_model, tokenizer = load_behavioral_model(

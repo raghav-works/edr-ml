@@ -36,7 +36,7 @@ _LGBM_ONNX_OPSET = 15
 
 def export_static_lgbm_to_onnx(model_path: str, output_path: str, num_features: int = 2568) -> None:
     """Convert a saved Cortex-Static model (LGBMModel.save() output --
-    `<model_path>.lgbm` + `<model_path>.meta`) to a single self-contained
+    `<model_path>.lgbm` + `<model_path>.meta.json`) to a single self-contained
     ONNX file.
 
     If the model has a Platt calibrator (the default -- see
@@ -172,7 +172,7 @@ def export_static_lgbm_to_onnx(model_path: str, output_path: str, num_features: 
 
 def export_memory_lgbm_to_onnx(model_path: str, output_path: str, num_features: int = 62) -> None:
     """Convert a saved Cortex-Memory model (MemoryLGBMModel.save() output --
-    `<model_path>.lgbm` + `<model_path>.meta`) to a single self-contained
+    `<model_path>.lgbm` + `<model_path>.meta.json`) to a single self-contained
     ONNX file. Structurally identical to export_static_lgbm_to_onnx() above
     (same onnxmltools -> skl2onnx -> graph-merge path, same opset
     constraints and degenerate-booster caveat -- see that function's
@@ -301,7 +301,7 @@ def export_memory_lgbm_to_onnx(model_path: str, output_path: str, num_features: 
 
 def export_network_lgbm_to_onnx(model_path: str, output_path: str, num_features: int = 78) -> None:
     """Convert a saved Cortex-Network model (NetworkLGBMModel.save() output --
-    `<model_path>.lgbm` + `<model_path>.meta`) to a single self-contained
+    `<model_path>.lgbm` + `<model_path>.meta.json`) to a single self-contained
     ONNX file. Structurally identical to export_static_lgbm_to_onnx() and
     export_memory_lgbm_to_onnx() above (same onnxmltools -> skl2onnx ->
     graph-merge path, same opset constraints and degenerate-booster caveat

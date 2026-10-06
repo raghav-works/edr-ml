@@ -33,8 +33,8 @@ raw counts.
 
 from __future__ import annotations
 
+import json
 import logging
-import pickle
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Union
@@ -203,16 +203,43 @@ class MemoryFeatureScaler:
         X = df[self.columns].to_numpy(dtype=np.float64)
         return (X - self.mean_) / self.std_
 
+    def to_dict(self) -> dict:
+        return {"format_version": 1, "columns": list(self.columns),
+                "mean": [float(v) for v in self.mean_], "std": [float(v) for v in self.std_]}
+
+    @classmethod
+    def from_dict(cls, data: object, where: str = "<dict>") -> "MemoryFeatureScaler":
+        if not isinstance(data, dict) or data.get("format_version") != 1:
+            raise ValueError(f"{where}: not a format_version 1 MemoryFeatureScaler JSON object")
+        columns, mean, std = data.get("columns"), data.get("mean"), data.get("std")
+        if not (isinstance(columns, list) and all(isinstance(c, str) for c in columns)):
+            raise ValueError(f"{where}: 'columns' must be a list of strings")
+        for name, vals in (("mean", mean), ("std", std)):
+            if not (isinstance(vals, list) and len(vals) == len(columns)
+                    and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in vals)):
+                raise ValueError(f"{where}: {name!r} must be {len(columns)} numbers")
+        return cls(columns=columns, mean_=np.array(mean, dtype=np.float64),
+                   std_=np.array(std, dtype=np.float64))
+
     def save(self, path: Union[str, Path]) -> None:
+        """JSON, not pickle (docs/CODE_REVIEW.md F24)."""
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "wb") as fh:
-            pickle.dump(self, fh, protocol=pickle.HIGHEST_PROTOCOL)
+        path.write_text(json.dumps(self.to_dict(), indent=2) + "\n", encoding="utf-8")
 
     @classmethod
     def load(cls, path: Union[str, Path]) -> "MemoryFeatureScaler":
-        with open(path, "rb") as fh:
-            return pickle.load(fh)
+        raw = Path(path).read_bytes()
+        if raw[:1] == b"\x80":  # pickle protocol 2+ opcode
+            raise ValueError(
+                f"{path} is a pickled MemoryFeatureScaler; scalers are read from JSON only. "
+                "Convert it once with `python -m scripts.convert_model_meta_to_json "
+                f"--memory-scaler {path} <out.json>` (only for files we produced ourselves).")
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError(f"unreadable MemoryFeatureScaler JSON {path}: {exc}") from exc
+        return cls.from_dict(data, where=str(path))
 
 
 def build_feature_matrix(

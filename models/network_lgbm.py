@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import pickle
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,6 +22,8 @@ from sklearn.metrics import (
     accuracy_score, auc, f1_score, precision_recall_curve,
     precision_score, recall_score, roc_auc_score, roc_curve,
 )
+
+from models.lgbm_artifacts import load_verified_booster, restore_calibrator, write_meta_json
 
 logger = logging.getLogger("cortex.network.train")
 
@@ -122,19 +123,23 @@ class NetworkLGBMModel:
         base = Path(path)
         base.parent.mkdir(parents=True, exist_ok=True)
         self.booster.save_model(str(base.with_suffix(".lgbm")), num_iteration=self.num_iterations)
-        meta = {"calibrator": self.calibrator, "feature_count": self.feature_count,
-                "num_iterations": self.num_iterations, "model_hash": self.model_hash}
-        with open(base.with_suffix(".meta"), "wb") as fh:
-            pickle.dump(meta, fh, protocol=pickle.HIGHEST_PROTOCOL)
+        # JSON, not pickle (docs/CODE_REVIEW.md F24); records the .lgbm sha256
+        write_meta_json(base, model_class="NetworkLGBMModel", calibrator=self.calibrator,
+                        feature_count=self.feature_count, num_iterations=self.num_iterations,
+                        model_hash=self.model_hash)
 
     @classmethod
-    def load(cls, path: Union[str, Path]) -> "NetworkLGBMModel":
+    def load(cls, path: Union[str, Path], expected_sha256: Optional[str] = None) -> "NetworkLGBMModel":
+        """Reads <path>.meta.json (never a pickle) and <path>.lgbm once,
+        verifies the .lgbm sha256 against the JSON and, if given, against
+        `expected_sha256` (the deployed model's pin in config/thresholds.yaml),
+        and builds the booster from the verified bytes. Raises
+        ModelArtifactError on any mismatch."""
         base = Path(path)
-        booster = lgb.Booster(model_file=str(base.with_suffix(".lgbm")))
-        with open(base.with_suffix(".meta"), "rb") as fh:
-            meta = pickle.load(fh)
-        return cls(booster=booster, calibrator=meta["calibrator"], feature_count=meta["feature_count"],
-                    num_iterations=meta["num_iterations"], model_hash=meta["model_hash"])
+        meta, booster = load_verified_booster(base, model_class="NetworkLGBMModel", expected_sha256=expected_sha256)
+        return cls(booster=booster, calibrator=restore_calibrator(PlattCalibrator, meta["calibrator"]),
+                   feature_count=meta["feature_count"], num_iterations=meta["num_iterations"],
+                   model_hash=meta["model_hash"])
 
 
 def _model_hash(booster: lgb.Booster) -> str:

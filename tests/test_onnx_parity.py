@@ -22,9 +22,9 @@ import os
 import pytest
 
 _REQUIRED = [
-    "data/models/cortex_static.onnx", "data/models/cortex_static.lgbm", "data/models/cortex_static.meta",
-    "data/models/cortex_memory.onnx", "data/models/cortex_memory.lgbm", "data/models/cortex_memory.meta",
-    "data/models/cortex_network.onnx", "data/models/cortex_network.lgbm", "data/models/cortex_network.meta",
+    "data/models/cortex_static.onnx", "data/models/cortex_static.lgbm", "data/models/cortex_static.meta.json",
+    "data/models/cortex_memory.onnx", "data/models/cortex_memory.lgbm", "data/models/cortex_memory.meta.json",
+    "data/models/cortex_network.onnx", "data/models/cortex_network.lgbm", "data/models/cortex_network.meta.json",
     "data/processed/ember2024_test.parquet",
     "data/processed/memory_test.parquet",
     "data/processed/network_test.parquet",

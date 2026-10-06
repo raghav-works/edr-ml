@@ -81,10 +81,10 @@ def _report(name: str, py: np.ndarray, ox: np.ndarray, y: np.ndarray,
 
 
 def check_static(static_n: int = 50000) -> dict:
-    from inference.policy_engine import STATIC_ALLOW_MAX, STATIC_BLOCK_MIN
+    from inference.policy_engine import STATIC_ALLOW_MAX, STATIC_BLOCK_MIN, STATIC_MODEL_SHA256
     from models.static_lgbm import LGBMModel
 
-    model = LGBMModel.load("data/models/cortex_static")
+    model = LGBMModel.load("data/models/cortex_static", expected_sha256=STATIC_MODEL_SHA256)
     pf = pq.ParquetFile("data/processed/ember2024_test.parquet")
     feat = [f"feature_{i}" for i in range(2568)]
     Xs, ys = [], []
@@ -108,10 +108,10 @@ def check_static(static_n: int = 50000) -> dict:
 
 def check_memory(limit: int | None = None) -> dict:
     from features.memory_features import add_derived_features, feature_matrix_columns
-    from inference.policy_engine import MEMORY_MALICIOUS_MIN
+    from inference.policy_engine import MEMORY_MALICIOUS_MIN, MEMORY_MODEL_SHA256
     from models.memory_lgbm import MemoryLGBMModel
 
-    model = MemoryLGBMModel.load("data/models/cortex_memory")
+    model = MemoryLGBMModel.load("data/models/cortex_memory", expected_sha256=MEMORY_MODEL_SHA256)
     df = add_derived_features(pd.read_parquet("data/processed/memory_test.parquet"))
     cols = feature_matrix_columns(df)
     X = df[cols].to_numpy(np.float32); y = df["label"].to_numpy(np.int32)
@@ -124,10 +124,10 @@ def check_memory(limit: int | None = None) -> dict:
 
 def check_network(limit: int | None = None) -> dict:
     from data.download_network import FEATURE_COLUMNS
-    from inference.policy_engine import NETWORK_MALICIOUS_MIN
+    from inference.policy_engine import NETWORK_MALICIOUS_MIN, NETWORK_MODEL_SHA256
     from models.network_lgbm import NetworkLGBMModel
 
-    model = NetworkLGBMModel.load("data/models/cortex_network")
+    model = NetworkLGBMModel.load("data/models/cortex_network", expected_sha256=NETWORK_MODEL_SHA256)
     df = pd.read_parquet("data/processed/network_test.parquet")
     X = df[FEATURE_COLUMNS].to_numpy(np.float32); y = df["label"].to_numpy(np.int32)
     if limit:
