@@ -63,7 +63,8 @@ CASES = [
     ((S.ALERT, B.MALICIOUS, NM, NN), F.TERMINATE, "behavioral_malicious"),
 
     # static ALLOW + one downstream signal
-    ((S.ALLOW, B.MALICIOUS, NM, NN), F.TERMINATE, "behavioral_malicious"),
+    # F4: behavioral MALICIOUS without static ALERT/BLOCK is capped at ALERT.
+    ((S.ALLOW, B.MALICIOUS, NM, NN), F.ALERT, "behavioral_malicious_uncorroborated"),
     ((S.ALLOW, B.BENIGN, M.MALICIOUS, NN), F.ALERT, "memory_malicious"),
     ((S.ALLOW, B.BENIGN, NM, N.MALICIOUS), F.ALERT, "network_malicious"),
     ((S.ALLOW, B.BENIGN, M.MALICIOUS, N.MALICIOUS), F.ALERT, "memory_malicious"),
@@ -78,12 +79,13 @@ CASES = [
 
     # item 9: a completed malicious/suspicious signal still wins over another
     # signal's ERROR; the failed-signal code is retained in the reasons list.
-    ((S.ERROR, B.MALICIOUS, NM, NN), F.TERMINATE, "static_scan_error"),
+    ((S.ERROR, B.MALICIOUS, NM, NN), F.ALERT, "static_scan_error"),
     ((S.ERROR, B.BENIGN, M.MALICIOUS, NN), F.ALERT, "static_scan_error"),
     ((S.ALERT, B.NOT_PROVIDED, NM, N.ERROR), F.ALERT, "network_scan_error"),
 
-    # priority: behavioral MALICIOUS (TERMINATE) beats memory/network MALICIOUS (ALERT)
-    ((S.ALLOW, B.MALICIOUS, M.MALICIOUS, N.MALICIOUS), F.TERMINATE, "behavioral_malicious"),
+    # priority: uncorroborated behavioral MALICIOUS leads the reasons, but
+    # memory/network are not static corroboration -> still ALERT (F4)
+    ((S.ALLOW, B.MALICIOUS, M.MALICIOUS, N.MALICIOUS), F.ALERT, "behavioral_malicious_uncorroborated"),
 ]
 
 
@@ -120,9 +122,54 @@ def test_decide_returns_block_iff_static_block_is_corroborated():
         assert (final == F.BLOCK) == expected_block
 
 
-def test_terminate_iff_behavioral_malicious():
+def test_terminate_iff_behavioral_malicious_and_static_suspicious():
+    """F4 default: TERMINATE needs behavioral MALICIOUS AND static ALERT/BLOCK."""
+    assert pe.BEHAVIORAL_TERMINATE_REQUIRES_CORROBORATION is True
     for s, b, m, n in _ALL:
-        assert (decide(s, b, m, n)[0] == F.TERMINATE) == (b == B.MALICIOUS)
+        expected = b == B.MALICIOUS and s in (S.ALERT, S.BLOCK)
+        assert (decide(s, b, m, n)[0] == F.TERMINATE) == expected
+
+
+def test_uncorroborated_behavioral_malicious_is_alert_with_distinct_reason():
+    for s, m, n in itertools.product((S.ALLOW, S.ERROR), list(M), list(N)):
+        final, reasons = decide(s, B.MALICIOUS, m, n)
+        assert final == F.ALERT
+        assert reasons[0] == "behavioral_malicious_uncorroborated"
+        assert "behavioral_malicious" not in reasons
+
+
+def test_legacy_flag_false_restores_unconditional_terminate(monkeypatch):
+    monkeypatch.setattr(pe, "BEHAVIORAL_TERMINATE_REQUIRES_CORROBORATION", False)
+    for s, b, m, n in _ALL:
+        final, reasons = decide(s, b, m, n)
+        assert (final == F.TERMINATE) == (b == B.MALICIOUS)
+        if b == B.MALICIOUS:
+            assert reasons[0] == "behavioral_malicious"
+        assert "behavioral_malicious_uncorroborated" not in reasons
+
+
+def test_flag_changes_only_uncorroborated_behavioral_rows(monkeypatch):
+    """Over the full 4-signal product, the flag may only change rows with
+    behavioral MALICIOUS and static ALLOW/ERROR, and only TERMINATE->ALERT."""
+    new = {v: decide(*v) for v in _ALL}
+    monkeypatch.setattr(pe, "BEHAVIORAL_TERMINATE_REQUIRES_CORROBORATION", False)
+    old = {v: decide(*v) for v in _ALL}
+    for (s, b, m, n), (new_final, _) in new.items():
+        old_final = old[(s, b, m, n)][0]
+        if b == B.MALICIOUS and s in (S.ALLOW, S.ERROR):
+            assert (old_final, new_final) == (F.TERMINATE, F.ALERT)
+        else:
+            assert new[(s, b, m, n)] == old[(s, b, m, n)]
+
+
+def test_flag_helper_requires_real_boolean():
+    assert pe._flag({"a": {"b": True}}, "a", "b") is True
+    assert pe._flag({"a": False}, "a") is False
+    with pytest.raises(RuntimeError, match="missing required key"):
+        pe._flag({}, "a")
+    for junk in (1, 0, "true", None):
+        with pytest.raises(RuntimeError, match="must be true or false"):
+            pe._flag({"a": junk}, "a")
 
 
 def test_network_alone_never_escalates_past_alert():
@@ -198,8 +245,8 @@ def test_malicious_signal_wins_over_other_signal_error():
     code is still recorded (audit-trail accumulation), and the code for the
     rung that drove the outcome is listed first."""
     final, reasons = decide(S.ERROR, B.MALICIOUS, NM, NN)
-    assert final == F.TERMINATE
-    assert reasons[0] == "behavioral_malicious"
+    assert final == F.ALERT  # F4: static ERROR does not corroborate
+    assert reasons[0] == "behavioral_malicious_uncorroborated"
     assert "static_scan_error" in reasons
 
     final, reasons = decide(S.ERROR, B.BENIGN, M.MALICIOUS, NN)
@@ -220,8 +267,8 @@ def test_error_codes_accumulate():
     }
 
     final, reasons = decide(S.ERROR, B.MALICIOUS, M.ERROR, N.ERROR)
-    assert final == F.TERMINATE
-    assert reasons[0] == "behavioral_malicious"
+    assert final == F.ALERT  # F4: static ERROR does not corroborate
+    assert reasons[0] == "behavioral_malicious_uncorroborated"
     assert set(reasons[1:]) == {
         "static_scan_error", "memory_scan_error", "network_scan_error",
     }
@@ -415,6 +462,7 @@ def test_module_thresholds_match_yaml():
     assert MEMORY_MALICIOUS_MIN == y["memory"]["malicious_at_or_above"]
     assert NETWORK_MALICIOUS_MIN == y["network"]["malicious_at_or_above"]
     assert EMULATION_MALICIOUS_MIN == y["emulation"]["malicious_at_or_above"]
+    assert pe.BEHAVIORAL_TERMINATE_REQUIRES_CORROBORATION is y["behavioral"]["terminate_requires_corroboration"]
 
 
 def test_static_thresholds_are_ordered():

@@ -310,7 +310,8 @@ def test_noncritical_degraded_group_keeps_verdict(monkeypatch):
 def test_critical_degraded_still_yields_to_behavioral_malicious(monkeypatch, tmp_path):
     """A degraded critical static extraction must NOT suppress a caller-
     supplied API trace: behavioral still runs, and a completed MALICIOUS
-    verdict wins (decide() rung 1 -> TERMINATE)."""
+    verdict is still surfaced (decide() rung 1 -> ALERT, since static ERROR
+    does not corroborate it under F4)."""
     import torch
 
     class _MaliciousBehavioral:
@@ -332,7 +333,9 @@ def test_critical_degraded_still_yields_to_behavioral_malicious(monkeypatch, tmp
 
     assert result.static_verdict == StaticVerdict.ERROR          # critical degraded
     assert result.behavioral_verdict.value == "MALICIOUS"        # behavioral still ran
-    assert result.final_decision == FinalDecision.TERMINATE
+    # F4: static ERROR does not corroborate behavioral -> ALERT, not TERMINATE
+    assert result.final_decision == FinalDecision.ALERT
+    assert "behavioral_malicious_uncorroborated" in result.reason_codes
     assert "static_features_degraded" in result.reason_codes
 
 
@@ -462,7 +465,7 @@ def test_allowlist_hit_does_not_suppress_network_malicious():
     assert result.final_decision == FinalDecision.ALERT  # network's own capped ceiling, unaffected by the allowlist
 
 
-def test_allowlist_hit_does_not_suppress_behavioral_terminate(tmp_path):
+def test_allowlist_hit_does_not_suppress_behavioral_malicious(tmp_path):
     import torch
 
     class _MaliciousBehavioral:
@@ -485,4 +488,7 @@ def test_allowlist_hit_does_not_suppress_behavioral_terminate(tmp_path):
     assert result.static_verdict == StaticVerdict.ALLOW
     assert "static_allowlisted_nsrl" in result.reason_codes
     assert result.behavioral_verdict.value == "MALICIOUS"
-    assert result.final_decision == FinalDecision.TERMINATE  # behavioral's uncapped authority, unaffected by the allowlist
+    # F4: an allowlisted (signed/NSRL) static ALLOW does not corroborate, so
+    # behavioral alone gives ALERT -- not suppressed, but not TERMINATE.
+    assert result.final_decision == FinalDecision.ALERT
+    assert "behavioral_malicious_uncorroborated" in result.reason_codes

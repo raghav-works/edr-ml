@@ -55,6 +55,19 @@ def _thr(data: dict, *path: str) -> float:
     return float(node)
 
 
+def _flag(data: dict, *path: str) -> bool:
+    """Like _thr() but for a required boolean policy switch. Rejects 0/1,
+    strings and null so a typo can't silently pick a policy."""
+    node: object = data
+    for key in path:
+        if not isinstance(node, dict) or key not in node:
+            raise RuntimeError(f"{_THRESHOLDS_PATH} is missing required key: {'.'.join(path)}")
+        node = node[key]
+    if not isinstance(node, bool):
+        raise RuntimeError(f"{_THRESHOLDS_PATH}:{'.'.join(path)} must be true or false, got {node!r}")
+    return node
+
+
 _THRESHOLDS = _load_thresholds()
 
 # Static thresholds are loaded from config/thresholds.yaml (see
@@ -110,6 +123,13 @@ STATIC_BLOCK_MIN = _thr(_THRESHOLDS, "static", "block_at_or_above")  # score >= 
 # targeted fix for this class of ambiguity -- not blanket threshold tuning
 # in response to a single hard example.
 BEHAVIORAL_MALICIOUS_MIN = _thr(_THRESHOLDS, "behavioral", "malicious_at_or_above")  # >= this -> MALICIOUS
+
+# docs/CODE_REVIEW.md F4: behavioral MALICIOUS reaches TERMINATE only when
+# static independently found the file suspicious (ALERT or BLOCK). Read at
+# call time by decide(), so tests can monkeypatch it.
+BEHAVIORAL_TERMINATE_REQUIRES_CORROBORATION = _flag(
+    _THRESHOLDS, "behavioral", "terminate_requires_corroboration"
+)
 
 # Memory threshold -- RE-DERIVED 2026-09-10 by the split-discipline retrain
 # in OPEN_ITEMS.md's "retrain cluster" section (PDF review items 2 and 3).
@@ -390,7 +410,12 @@ def decide(
 ) -> tuple[FinalDecision, list[str]]:
     """
     Priority order (never averaged):
-        1. behavioral MALICIOUS      -> TERMINATE
+        1. behavioral MALICIOUS      -> TERMINATE if static is ALERT/BLOCK,
+                                        else ALERT (reason
+                                        behavioral_malicious_uncorroborated).
+                                        Unconditional TERMINATE only when
+                                        BEHAVIORAL_TERMINATE_REQUIRES_
+                                        CORROBORATION is false (legacy).
         2. memory MALICIOUS          -> ALERT           (capped -- see below)
         3. network MALICIOUS         -> ALERT           (capped -- see below)
         4. static ALERT  or  BLOCK   -> ALERT           (BLOCK is INTERIM-
@@ -487,8 +512,8 @@ def decide(
     also true on the same scan (see the `corroborating_signals` computation
     above the priority chain, and addition B1's docstring section for the
     general 3-way corroboration concept this reuses). Behavioral needs no
-    special-casing here -- it already sits at rung 1 with uncapped
-    TERMINATE authority that outranks BLOCK regardless of any of this.
+    special-casing here -- it already sits at rung 1, and with static
+    BLOCK its TERMINATE is corroborated (F4), so it outranks BLOCK.
 
     CRITICAL CONSTRAINT: corroboration unlocks ONLY static's own BLOCK
     verdict. It must NEVER let memory's or network's own authority escalate
@@ -602,12 +627,11 @@ def decide(
     whenever 2+ of those three conditions hold, computed up-front (the same
     "before the priority chain, independent of which rung fires" pattern as
     the ERROR reasons above) so it is attached regardless of which rung
-    actually decides the outcome -- including a TERMINATE driven by
-    behavioral alone, where corroboration cannot change the result but is
-    still useful audit information ("was this TERMINATE also independently
-    corroborated?"). Behavioral is deliberately NOT a corroboration input
-    and does not need corroborating to reach TERMINATE -- it already has
-    uncapped authority on its own (see the module-level decision policy).
+    actually decides the outcome -- including a behavioral-driven
+    TERMINATE, where corroboration cannot change the result but is still
+    useful audit information ("was this TERMINATE also corroborated by
+    memory/network?"). Behavioral is deliberately NOT an input to THIS flag;
+    its own TERMINATE gate is static ALERT/BLOCK (rung 1, F4).
     A downstream consumer (e.g. a review-queue prioritizer) can treat a
     corroborated ALERT as higher-priority than a single-signal one purely
     from this reason code.
@@ -660,7 +684,14 @@ def decide(
     # behavioral signal can still escalate the same file to TERMINATE.
 
     if behavioral_verdict == BehavioralVerdict.MALICIOUS:
-        return FinalDecision.TERMINATE, ["behavioral_malicious", *corroboration, *reasons]
+        static_suspicious = static_verdict in (StaticVerdict.ALERT, StaticVerdict.BLOCK)
+        if static_suspicious or not BEHAVIORAL_TERMINATE_REQUIRES_CORROBORATION:
+            return FinalDecision.TERMINATE, ["behavioral_malicious", *corroboration, *reasons]
+        # F4: static ALLOW (incl. allowlisted) or ERROR -- behavioral alone
+        # is not trusted to kill a process. Returned here so its reason code
+        # leads; no lower rung could produce more than ALERT for these
+        # static verdicts anyway (B2 needs static BLOCK).
+        return FinalDecision.ALERT, ["behavioral_malicious_uncorroborated", *corroboration, *reasons]
 
     # Addition B2 (see docstring) -- MUST be checked here, before the
     # memory/network ALERT rungs immediately below, or a corroborated

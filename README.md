@@ -7,7 +7,7 @@
 | Signal | What it looks at | Role in the decision |
 |---|---|---|
 | **Static** | The PE file on disk (headers, sections, imports, strings, signature) | ALLOW / ALERT / BLOCK |
-| **Behavioral** | The API-call trace recorded while the file runs | Can TERMINATE |
+| **Behavioral** | The API-call trace recorded while the file runs | Can TERMINATE when Static is ALERT or BLOCK; otherwise ALERT |
 | **Memory** | Memory-forensics features (injected / fileless activity) | Capped at ALERT |
 | **Network** | Network-flow statistics (C2, DoS, brute force) | Capped at ALERT |
 | **Emulation** | API sequence from the Speakeasy emulator | Logged only, not used for decisions |
@@ -258,7 +258,8 @@ The **policy engine** checks these rules in order and returns the first match:
 
 | # | Condition | Decision |
 |---|---|---|
-| 1 | Behavioral is MALICIOUS | **TERMINATE** |
+| 1 | Behavioral is MALICIOUS and Static is ALERT or BLOCK | **TERMINATE** |
+| 1b | Behavioral is MALICIOUS, Static is ALLOW or ERROR | **ALERT** (`behavioral_malicious_uncorroborated`; legacy TERMINATE if `behavioral.terminate_requires_corroboration: false`) |
 | 2 | Static BLOCK **and** Memory or Network MALICIOUS | **BLOCK** |
 | 3 | Memory or Network MALICIOUS | **ALERT** |
 | 4 | Static ALERT, or Static BLOCK with no corroboration | **ALERT** |

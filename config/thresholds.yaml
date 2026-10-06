@@ -3,7 +3,8 @@
 # file is missing, malformed, or missing a key. Edit thresholds HERE, not in
 # Python. Every key below is required (static.allow_below,
 # static.block_at_or_above, behavioral/memory/network/emulation
-# .malicious_at_or_above); sequence.* and file.* are informational for now
+# .malicious_at_or_above, behavioral.terminate_requires_corroboration
+# (boolean)); sequence.* and file.* are informational for now
 # (api_tokenizer / pipeline still hold their own constants).
 #
 # static.* RE-DERIVED 2026-09-08 after the Platt-calibrator fix
@@ -175,6 +176,12 @@ static:
 
 behavioral:
   malicious_at_or_above: 0.60  # score >= this -> MALICIOUS, else BENIGN
+  # docs/CODE_REVIEW.md F4. true (default): behavioral MALICIOUS reaches
+  # TERMINATE only when static is ALERT or BLOCK on the same file; otherwise
+  # (static ALLOW incl. allowlisted, or ERROR) it is ALERT with reason
+  # behavioral_malicious_uncorroborated. false restores the legacy
+  # unconditional TERMINATE.
+  terminate_requires_corroboration: true
 
 memory:
   malicious_at_or_above: 0.0024964628  # score >= this -> MALICIOUS, else BENIGN (capped at ALERT, never BLOCK/TERMINATE). Derived 2026-09-10 on the new cal split, target_fpr=0.01 (56/5,860 benign FP, detection 0.9993). Superseded: 0.0006464189644018, 0.0005358335957155212
