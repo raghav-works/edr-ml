@@ -30,6 +30,9 @@ MAX_SEQ_LEN = 100
 MIN_SEQ_LEN = 10
 PAD_TOKEN = "<PAD>"
 UNK_TOKEN = "<UNK>"
+# Fixed by construction: ApiTokenizer always puts <PAD>, <UNK> first.
+PAD_ID = 0
+UNK_ID = 1
 
 
 class ApiTokenizer:
@@ -46,6 +49,7 @@ class ApiTokenizer:
                 ordered.append(tok)
         self.token_to_id = {tok: i for i, tok in enumerate(ordered)}
         self.id_to_token = {i: tok for tok, i in self.token_to_id.items()}
+        assert self.token_to_id[PAD_TOKEN] == PAD_ID and self.token_to_id[UNK_TOKEN] == UNK_ID
 
     @property
     def vocab_size(self) -> int:
@@ -82,6 +86,13 @@ class ApiTokenizer:
                                                flag it in the scan audit trail
           - "ok"        : exactly 100 calls -> scored
           - "truncated" : >100 calls        -> scored on the first 100
+
+        Names are canonicalised exactly as at training time
+        (data/download_behavioral.py): lowercase, nothing else
+        (docs/CODE_REVIEW.md F3). A CamelCase trace from a real sandbox
+        encodes identically to its lowercase form. Empty / non-ASCII /
+        whitespace-containing names are NOT dropped -- they stay <UNK>;
+        see input_diagnostics().
         """
         n = len(api_calls)
         if n == 0:
@@ -98,7 +109,7 @@ class ApiTokenizer:
         used = api_calls[:MAX_SEQ_LEN]
         ids = np.full(MAX_SEQ_LEN, self.token_to_id[PAD_TOKEN], dtype=np.int64)
         for i, name in enumerate(used):
-            ids[i] = self.token_to_id.get(name, self.token_to_id[UNK_TOKEN])
+            ids[i] = self.token_to_id.get(name.lower(), UNK_ID)
         return ids, status
 
     def encode_batch(self, batch: Sequence[Sequence[str]]) -> tuple[np.ndarray, List[str]]:
@@ -109,6 +120,27 @@ class ApiTokenizer:
             out[i] = ids
             statuses.append(status)
         return out, statuses
+
+
+def scored_unk_rate(token_ids: np.ndarray, n_calls: int) -> float:
+    """Fraction of <UNK> among the real (scored) positions of an encoded
+    trace -- the first min(n_calls, MAX_SEQ_LEN) slots. 0.0 for an empty
+    trace."""
+    n = min(n_calls, MAX_SEQ_LEN)
+    if n == 0:
+        return 0.0
+    return float(np.count_nonzero(np.asarray(token_ids)[:n] == UNK_ID)) / n
+
+
+def input_diagnostics(api_calls: Sequence[str]) -> dict[str, int]:
+    """Input-format problems in a raw trace (whole trace, not just the scored
+    window). Diagnostic only -- scoring is unchanged; such names simply
+    encode as <UNK>."""
+    return {
+        "empty_names": sum(1 for n in api_calls if n == ""),
+        "non_ascii_names": sum(1 for n in api_calls if not n.isascii()),
+        "whitespace_names": sum(1 for n in api_calls if any(c.isspace() for c in n)),
+    }
 
 
 def load_api_calls_json(path: str | Path) -> List[str]:

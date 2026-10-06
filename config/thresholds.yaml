@@ -4,7 +4,8 @@
 # Python. Every key below is required (static.allow_below,
 # static.block_at_or_above, behavioral/memory/network/emulation
 # .malicious_at_or_above, behavioral.terminate_requires_corroboration
-# (boolean), behavioral.pending_with_static_allow (choice)); sequence.* and
+# (boolean), behavioral.pending_with_static_allow (choice),
+# behavioral.max_unk_rate); sequence.* and
 # file.* are informational for now
 # (api_tokenizer / pipeline still hold their own constants).
 #
@@ -188,6 +189,14 @@ behavioral:
   # too short to score). One of ALLOW_UNVERIFIED (default), NEEDS_REVIEW, or
   # ALLOW (legacy silent pass).
   pending_with_static_allow: ALLOW_UNVERIFIED
+  # docs/CODE_REVIEW.md F3. Max fraction of <UNK> tokens in the scored
+  # window (first min(n, 100) calls); above it the trace is not scored
+  # (PENDING, reason behavioral_unk_rate_high). Measured 2026-10-06: every
+  # val/test trace has rate 0.0, so this affects 0 of 1,813 scored traces.
+  # Injecting random <UNK>s raises benign FPR@0.60 by ~+1.9 pts at 0.10,
+  # +4.2 at 0.25, +12.6 at 0.50 -- 0.10 caps that harm while tolerating a
+  # few unseen names from another sandbox. A judgement call, not an optimum.
+  max_unk_rate: 0.10
 
 memory:
   malicious_at_or_above: 0.0024964628  # score >= this -> MALICIOUS, else BENIGN (capped at ALERT, never BLOCK/TERMINATE). Derived 2026-09-10 on the new cal split, target_fpr=0.01 (56/5,860 benign FP, detection 0.9993). Superseded: 0.0006464189644018, 0.0005358335957155212

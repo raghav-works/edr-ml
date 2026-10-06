@@ -24,7 +24,6 @@ End-to-end pipeline coverage for:
 from __future__ import annotations
 
 import hashlib
-import math
 import os
 
 import numpy as np
@@ -546,14 +545,12 @@ def test_non_finite_behavioral_score_is_error(tmp_path, logit):
     pipe = _pipe(static_model=_BenignStaticModel(),
                  behavioral_model=_ConstBehavioral(), tokenizer=_OkTokenizer())
     result = pipe.scan(_VALID_PE, api_calls_json_path=str(trace))
-    if math.isnan(logit):
-        # sigmoid(nan) = nan -> ERROR -> NEEDS_REVIEW
-        assert result.behavioral_verdict == BehavioralVerdict.ERROR
-        assert result.final_decision == FinalDecision.NEEDS_REVIEW
-    else:
-        # sigmoid(+-inf) is the finite 1.0 / 0.0: a legitimate extreme score
-        expected = BehavioralVerdict.MALICIOUS if logit > 0 else BehavioralVerdict.BENIGN
-        assert result.behavioral_verdict == expected
+    # Checked on the raw logit (Step 4): sigmoid(+-inf) would otherwise hide a
+    # broken model behind a normal-looking 1.0 / 0.0.
+    assert result.behavioral_verdict == BehavioralVerdict.ERROR
+    assert result.behavioral_score is None
+    assert "behavioral_logit_non_finite" in result.reason_codes
+    assert result.final_decision == FinalDecision.NEEDS_REVIEW
 
 
 def test_behavioral_pending_with_static_allow_is_allow_unverified(tmp_path):

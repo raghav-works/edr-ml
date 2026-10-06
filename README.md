@@ -165,7 +165,7 @@ The pipeline has two stages.
 1. Validate the file path (exists, readable, ≤ 100 MiB) and the PE format, and reject truncated PEs (parsed once; the same parse feeds feature extraction)
 2. Check the known-file allowlist (NSRL hash or trusted Authenticode signature)
 3. Extract PE features → Static verdict
-4. Tokenize the API trace → Behavioral verdict
+4. Tokenize the API trace (API names lowercased, exactly as in training) → Behavioral verdict. A trace whose scored window is more than 10% unknown names (`behavioral.max_unk_rate`) is not scored: PENDING with reason `behavioral_unk_rate_high`. Input-format problems (empty, non-ASCII or whitespace-containing names) are counted in `behavioral_input_diagnostics` on the scan result
 5. Score memory / network vectors if supplied → Memory / Network verdicts
 6. Apply the policy engine rules → final decision
 7. Emit a structured JSON security event (UTC timestamp + correlation UUID)

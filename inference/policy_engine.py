@@ -153,6 +153,12 @@ BEHAVIORAL_PENDING_DECISION = _choice(
     _THRESHOLDS, _PENDING_DECISION_CHOICES, "behavioral", "pending_with_static_allow"
 )
 
+# docs/CODE_REVIEW.md F3: a scored window with more than this fraction of
+# <UNK> tokens is not scored (PENDING, reason behavioral_unk_rate_high).
+BEHAVIORAL_MAX_UNK_RATE = _thr(_THRESHOLDS, "behavioral", "max_unk_rate")
+if not 0.0 <= BEHAVIORAL_MAX_UNK_RATE <= 1.0:
+    raise RuntimeError(f"{_THRESHOLDS_PATH}:behavioral.max_unk_rate must be in [0, 1]")
+
 # Memory threshold -- RE-DERIVED 2026-09-10 by the split-discipline retrain
 # in OPEN_ITEMS.md's "retrain cluster" section (PDF review items 2 and 3).
 # data/models/cortex_memory was retrained on a new 4-way split
@@ -430,6 +436,9 @@ class ScanResult:
     # = "degraded"; a degraded non-critical group only sets the health flag.
     # decide() never sees this list.
     degraded_groups: list[str] = field(default_factory=list)
+    # F3: per-trace input-format counts (empty / non-ASCII / whitespace
+    # names) plus the scored-window <UNK> rate; None when no trace was read.
+    behavioral_input_diagnostics: Optional[dict] = None
 
     def to_dict(self) -> dict:
         return {
@@ -443,6 +452,7 @@ class ScanResult:
             "reason_codes": self.reason_codes,
             "signal_health": self.signal_health,
             "degraded_groups": self.degraded_groups,
+            "behavioral_input_diagnostics": self.behavioral_input_diagnostics,
         }
 
 

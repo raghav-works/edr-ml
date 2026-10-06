@@ -62,12 +62,14 @@ from features.authenticode_trust import verify_trusted_chain
 from features.nsrl_allowlist import NSRLAllowlist
 from features.pe_features import CRITICAL_FEATURE_GROUPS, PEFeatureExtractor, truncation_findings
 from inference.policy_engine import (
-    BehavioralVerdict, FinalDecision, MemoryVerdict, NetworkVerdict, ScanResult, StaticVerdict,
+    BEHAVIORAL_MAX_UNK_RATE, BehavioralVerdict, FinalDecision, MemoryVerdict, NetworkVerdict, ScanResult, StaticVerdict,
     behavioral_verdict_from_score, decide, memory_verdict_from_score,
     network_verdict_from_score, static_verdict_from_score,
 )
 from models.static_lgbm import LGBMModel
-from tokenizer.api_tokenizer import ApiTokenizer, load_api_calls_json
+from tokenizer.api_tokenizer import (
+    ApiTokenizer, input_diagnostics, load_api_calls_json, scored_unk_rate,
+)
 
 logger = logging.getLogger("cortex.pipeline")
 
@@ -82,6 +84,10 @@ class CortexPipeline:
         self.static_model = static_model
         self.behavioral_model = behavioral_model
         self.tokenizer = tokenizer
+        # docs/CODE_REVIEW.md F21: dropout and batch-norm must be in inference
+        # mode, or a model handed over in train mode scores non-
+        # deterministically. Re-checked before every scoring call as well.
+        self._ensure_eval()
         # memory_model / network_model are optional. Each is a trained
         # LightGBM model (models/memory_lgbm.py, models/network_lgbm.py) that
         # scores a caller-supplied feature vector -- there is no live memory
@@ -290,7 +296,7 @@ class CortexPipeline:
         if (result.static_verdict in (StaticVerdict.ALLOW, StaticVerdict.ALERT, StaticVerdict.BLOCK)
                 and api_calls_json_path is not None):
             (result.behavioral_score, result.behavioral_verdict,
-             beh_note) = self._run_behavioral(api_calls_json_path)
+             beh_notes, result.behavioral_input_diagnostics) = self._run_behavioral(api_calls_json_path)
             # _record_signal_health's "not configured" check is `model is
             # None`; behavioral's not-configured condition is
             # `behavioral_model is None or tokenizer is None` (see
@@ -301,8 +307,7 @@ class CortexPipeline:
                 self.behavioral_model if self.tokenizer is not None else None
             )
             self._record_signal_health(result, "behavioral", result.behavioral_verdict, configured_behavioral)
-            if beh_note is not None:
-                result.reason_codes.append(beh_note)
+            result.reason_codes += beh_notes
         # else: static ERROR, or no api_calls_json_path -> behavioral stays NOT_PROVIDED
 
         # 6b. If a CRITICAL feature group degraded (features.pe_features
@@ -415,15 +420,29 @@ class CortexPipeline:
             return None, NetworkVerdict.ERROR
 
     # ------------------------------------------------------------------
-    def _run_behavioral(self, api_calls_json_path: str) -> tuple[Optional[float], BehavioralVerdict, Optional[str]]:
-        """Returns (score, verdict, note).
+    def _ensure_eval(self) -> None:
+        if self.behavioral_model is not None and getattr(self.behavioral_model, "training", False):
+            self.behavioral_model.eval()
 
-        `note` is "behavioral_short_trace" when the verdict came from a short
-        (10-99 call) padded sequence -- the model is validated there (test
-        AUC 0.9921, 0 FP on 118 benign short rows) but short-benign coverage
-        rests almost entirely on one dataset (MalbehavD-V1), so a caller
-        should surface this in the scan's audit trail, the same caution
-        applied to memory/network authority. `note` is None otherwise.
+    # ------------------------------------------------------------------
+    def _run_behavioral(self, api_calls_json_path: str
+                        ) -> tuple[Optional[float], BehavioralVerdict, list[str], Optional[dict]]:
+        """Returns (score, verdict, notes, input_diagnostics).
+
+        `notes` (reason codes for the audit trail, possibly empty):
+          - "behavioral_short_trace": the verdict came from a short (10-99
+            call) padded sequence -- the model is validated there (test
+            AUC 0.9921, 0 FP on 118 benign short rows) but short-benign
+            coverage rests almost entirely on one dataset (MalbehavD-V1).
+          - "behavioral_unk_rate_high": more than BEHAVIORAL_MAX_UNK_RATE of
+            the scored window is <UNK> -> PENDING, not scored (F3).
+          - "behavioral_logit_non_finite": the model returned NaN/inf ->
+            ERROR. Checked on the raw logit because sigmoid(+-inf) is a
+            normal-looking 1.0/0.0 (F12 follow-up).
+
+        `input_diagnostics`: input_diagnostics() counts plus "unk_rate" for
+        any trace that was read; None if the model is not configured or the
+        file could not be read. Logged at WARNING when a count is non-zero.
 
         Sequences with < MIN_SEQ_LEN (10) real calls stay PENDING: below that
         the model is non-discriminative (val+test AUC 0.66, 0/4 malicious
@@ -435,22 +454,37 @@ class CortexPipeline:
         NEEDS_REVIEW); ERROR is reserved for a real runtime failure below.
         """
         if self.behavioral_model is None or self.tokenizer is None:
-            return None, BehavioralVerdict.NOT_PROVIDED, None
+            return None, BehavioralVerdict.NOT_PROVIDED, [], None
+        diagnostics: Optional[dict] = None
         try:
             calls = load_api_calls_json(api_calls_json_path)
+            diagnostics = input_diagnostics(calls)
+            if any(diagnostics.values()):
+                logger.warning("behavioral trace %s has input-format problems: %s",
+                               api_calls_json_path, diagnostics)
             token_ids, status = self.tokenizer.encode(calls)
+            diagnostics["unk_rate"] = scored_unk_rate(token_ids, len(calls))
             if status in ("empty", "too_short"):
-                return None, BehavioralVerdict.PENDING, None
+                return None, BehavioralVerdict.PENDING, [], diagnostics
+            if diagnostics["unk_rate"] > BEHAVIORAL_MAX_UNK_RATE:
+                logger.warning("behavioral trace %s: <UNK> rate %.3f > %.3f -> PENDING",
+                               api_calls_json_path, diagnostics["unk_rate"], BEHAVIORAL_MAX_UNK_RATE)
+                return None, BehavioralVerdict.PENDING, ["behavioral_unk_rate_high"], diagnostics
 
             import torch
-            with torch.no_grad():
+            self._ensure_eval()
+            with torch.inference_mode():
                 x = torch.from_numpy(token_ids).long().unsqueeze(0).to(self.device)
-                score = torch.sigmoid(self.behavioral_model(x)).item()
-            note = "behavioral_short_trace" if status == "short" else None
-            return score, behavioral_verdict_from_score(score), note
+                logit = self.behavioral_model(x)
+                if not bool(torch.isfinite(logit).all()):
+                    logger.error("behavioral model returned a non-finite logit for %s", api_calls_json_path)
+                    return None, BehavioralVerdict.ERROR, ["behavioral_logit_non_finite"], diagnostics
+                score = torch.sigmoid(logit).item()
+            notes = ["behavioral_short_trace"] if status == "short" else []
+            return score, behavioral_verdict_from_score(score), notes, diagnostics
         except Exception:
             logger.exception("behavioral scan failed for %s", api_calls_json_path)
-            return None, BehavioralVerdict.ERROR, None
+            return None, BehavioralVerdict.ERROR, [], diagnostics
 
     # ------------------------------------------------------------------
     def to_security_event(self, result: ScanResult) -> dict:
