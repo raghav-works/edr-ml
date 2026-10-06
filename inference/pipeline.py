@@ -30,6 +30,9 @@ Cortex-Memory and Cortex-Network as independent signals:
      on-disk file for steps 1-4 to evaluate. Neither derives its own
      features: the caller supplies them (no live memory or traffic capture
      exists in this repo), the same as behavioral's API-call trace.
+     With file_scan.attach_memory_network false (docs/CODE_REVIEW.md F11),
+     steps 7/7b are skipped for file scans: both stay NOT_PROVIDED and a
+     supplied vector is recorded as signal_health "detached_by_config".
   8. policy engine -> final decision (ALLOW / NEEDS_REVIEW / ALERT / BLOCK /
      TERMINATE). Memory's and Network's authority is each capped at ALERT,
      one rung below behavioral's TERMINATE; see
@@ -62,7 +65,7 @@ from features.authenticode_trust import verify_trusted_chain
 from features.nsrl_allowlist import NSRLAllowlist
 from features.pe_features import CRITICAL_FEATURE_GROUPS, PEFeatureExtractor, truncation_findings
 from inference.policy_engine import (
-    BEHAVIORAL_MAX_UNK_RATE, BehavioralVerdict, FinalDecision, MemoryVerdict, NetworkVerdict, ScanResult, StaticVerdict,
+    BEHAVIORAL_MAX_UNK_RATE, FILE_SCAN_ATTACH_MEMORY_NETWORK, BehavioralVerdict, FinalDecision, MemoryVerdict, NetworkVerdict, ScanResult, StaticVerdict,
     behavioral_verdict_from_score, decide, memory_verdict_from_score,
     network_verdict_from_score, static_verdict_from_score,
 )
@@ -162,12 +165,25 @@ class CortexPipeline:
         # policy_engine.decide() for why their authority is nonetheless
         # capped at ALERT. Neither captures its own data: the caller supplies
         # the feature vectors.
+        #
+        # docs/CODE_REVIEW.md F11: with file_scan.attach_memory_network false
+        # (config/thresholds.yaml), a supplied vector is NOT scored for this
+        # file's decision -- both stay NOT_PROVIDED -- and the detachment is
+        # recorded in signal_health and logged rather than dropped silently.
+        # Read at call time so tests can monkeypatch it.
+        attach = FILE_SCAN_ATTACH_MEMORY_NETWORK
         if memory_features is not None:
-            result.memory_score, result.memory_verdict = self._run_memory(memory_features)
-            self._record_signal_health(result, "memory", result.memory_verdict, self.memory_model)
+            if attach:
+                result.memory_score, result.memory_verdict = self._run_memory(memory_features)
+                self._record_signal_health(result, "memory", result.memory_verdict, self.memory_model)
+            else:
+                self._detach_signal(result, "memory")
         if network_features is not None:
-            result.network_score, result.network_verdict = self._run_network(network_features)
-            self._record_signal_health(result, "network", result.network_verdict, self.network_model)
+            if attach:
+                result.network_score, result.network_verdict = self._run_network(network_features)
+                self._record_signal_health(result, "network", result.network_verdict, self.network_model)
+            else:
+                self._detach_signal(result, "network")
 
         # 2. basic input validation
         err = self._validate_path(path)
@@ -338,6 +354,16 @@ class CortexPipeline:
 
     # ------------------------------------------------------------------
     @staticmethod
+    def _detach_signal(result: ScanResult, name: str) -> None:
+        """F11: `name`_features were supplied to a file scan while
+        file_scan.attach_memory_network is false. Not scored, verdict stays
+        NOT_PROVIDED; visible in signal_health and the log."""
+        result.signal_health[name] = "detached_by_config"
+        logger.warning("%s_features supplied to a file scan of %s but file_scan.attach_memory_network "
+                       "is false: not scored and not used in the decision", name, result.file_path)
+
+    # ------------------------------------------------------------------
+    @staticmethod
     def _record_signal_health(result: ScanResult, name: str, verdict, model) -> None:
         """Record model health for `name` on result.signal_health, SEPARATE
         from the security verdict (review item 10). Only non-healthy states
@@ -352,6 +378,9 @@ class CortexPipeline:
              must not push every scan to NEEDS_REVIEW -- but no longer
              silent: a caller that wants fail-closed behaviour can key off
              this field itself)
+          - memory/network features supplied while file_scan
+            .attach_memory_network is false -> "detached_by_config"
+            (written by _detach_signal, not here; docs/CODE_REVIEW.md F11)
 
         decide() never receives signal_health; this is diagnostic output only.
         """

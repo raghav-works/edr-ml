@@ -6,7 +6,7 @@
 # .malicious_at_or_above, behavioral.terminate_requires_corroboration
 # (boolean), behavioral.pending_with_static_allow (choice),
 # behavioral.max_unk_rate, static/memory/network.model_sha256 (64 lowercase
-# hex chars)); sequence.* and
+# hex chars), file_scan.attach_memory_network (boolean)); sequence.* and
 # file.* are informational for now
 # (api_tokenizer / pipeline still hold their own constants).
 #
@@ -231,6 +231,20 @@ network:
 # docs/TECHNICAL_NOTES.md's "Cortex-Emulation" section.
 emulation:
   malicious_at_or_above: 0.999358594417572  # telemetry EmulationVerdict only; never reaches decide()
+
+# docs/CODE_REVIEW.md F11. Memory and network vectors describe a host memory
+# snapshot / a network flow, not the file being scanned. true (default,
+# today's behaviour): CortexPipeline.scan() scores caller-supplied
+# memory/network features and decide() uses them for the file's decision.
+# false: they are not scored for a file scan, decide() gets NOT_PROVIDED for
+# both, and a supplied vector is recorded as signal_health
+# "detached_by_config" with a warning. Consequences of false: static BLOCK
+# can never become a final BLOCK (its only corroborators are memory/network),
+# memory/network ALERTs disappear from file scans, and
+# corroborated_multi_signal can no longer come from memory/network. Stays
+# true until the static BLOCK-path decision is made.
+file_scan:
+  attach_memory_network: true
 
 sequence:
   max_api_calls: 100

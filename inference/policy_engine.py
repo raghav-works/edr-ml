@@ -152,6 +152,13 @@ BEHAVIORAL_TERMINATE_REQUIRES_CORROBORATION = _flag(
     _THRESHOLDS, "behavioral", "terminate_requires_corroboration"
 )
 
+# docs/CODE_REVIEW.md F11: whether CortexPipeline.scan() attaches
+# caller-supplied memory/network vectors to a FILE's decision. Read by the
+# pipeline at scan time (it never reaches decide(), which only ever sees the
+# verdicts it is given). See config/thresholds.yaml file_scan.* for what
+# changes when this is false.
+FILE_SCAN_ATTACH_MEMORY_NETWORK = _flag(_THRESHOLDS, "file_scan", "attach_memory_network")
+
 # docs/CODE_REVIEW.md F13: the final decision when static is ALLOW, nothing
 # else is malicious or errored, and behavioral was requested but PENDING.
 # ALLOW reproduces the legacy silent pass.

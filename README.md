@@ -278,6 +278,30 @@ The **policy engine** checks these rules in order and returns the first match:
 
 Measurement and rationale: [docs/TECHNICAL_NOTES.md](docs/TECHNICAL_NOTES.md#truncated-pe-files-f17).
 
+**Memory and Network on file scans.** The key `file_scan.attach_memory_network`
+controls whether memory and network evidence feeds a file's decision. It is a
+required boolean, and anything other than `true` or `false` fails at startup.
+Memory and network vectors describe a host memory snapshot or a network flow,
+not the scanned file.
+
+- **`true` (default, today's behaviour):** `CortexPipeline.scan()` scores any
+  supplied memory or network features, and rules 2 and 3 use them for the
+  file's decision.
+- **`false`:** they are not scored for a file scan, and the policy engine sees
+  them as NOT_PROVIDED. A vector that was supplied anyway is recorded as
+  `signal_health: "detached_by_config"` and logged as a warning; it is not
+  dropped silently.
+
+With `false`:
+- **Rule 2 can never fire.** A Static BLOCK always ends as ALERT, because
+  Memory and Network are its only corroborators.
+- **Rule 3 disappears.** No more Memory or Network ALERTs.
+- `corroborated_multi_signal` can no longer appear.
+- A Memory or Network model error no longer sends the file to NEEDS_REVIEW.
+
+The default stays `true` until the static BLOCK-path decision is made. Full
+before/after table: [docs/TECHNICAL_NOTES.md](docs/TECHNICAL_NOTES.md#memory-and-network-on-file-scans-f11).
+
 > If you retrain a model, its score distribution changes and you must derive its thresholds again.
 
 ---

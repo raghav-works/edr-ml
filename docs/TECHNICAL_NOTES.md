@@ -1188,6 +1188,54 @@ Regression, pickle loader vs JSON loader (with `weights_only=True` for emulation
 | 20,000 network test rows | bit-identical, 0 verdict flips |
 | emulation test traces (2,495) | bit-identical, 0 verdict flips |
 
+## Memory and Network on file scans (F11)
+Memory and network vectors describe a host memory snapshot or a network flow,
+not the file being scanned. `CortexPipeline.scan()` has always scored any
+caller-supplied memory and network vectors and fed them into the file's
+`decide()` call.
+
+Flag: `config/thresholds.yaml` `file_scan.attach_memory_network`.
+- It is a required boolean, parsed strictly by `_flag`. It is exposed as
+  `policy_engine.FILE_SCAN_ATTACH_MEMORY_NETWORK`, and the pipeline reads it
+  at scan time.
+- `true` is the default and keeps today's behaviour.
+- `false` behaves as follows:
+  - neither vector is scored;
+  - both verdicts stay NOT_PROVIDED;
+  - each supplied vector is recorded as `signal_health[<signal>] =
+    "detached_by_config"`, and the pipeline logs a warning.
+  - This also applies when the file itself cannot be analyzed.
+- `decide()` is unchanged; it only receives different inputs.
+
+Effect of `false` on `decide()` over all 320 input combinations (4 static × 5
+behavioral × 4 memory × 4 network). Every combination is reachable from
+`scan()`, because static becomes ERROR after behavioral has run when a critical
+feature group degrades.
+
+- **Overall:** 232 combinations change, 99 of them in decision. Nothing
+  changes when memory and network are both NOT_PROVIDED or BENIGN.
+- **Decision changes:**
+
+  | Before → after | Combinations | Inputs |
+  |---|---|---|
+  | BLOCK → ALERT | 28 | all of them: every static BLOCK with memory or network MALICIOUS |
+  | ALERT → NEEDS_REVIEW | 35 | memory or network MALICIOUS, with static ERROR or behavioral ERROR |
+  | ALERT → ALLOW | 14 | static ALLOW, memory or network MALICIOUS, behavioral BENIGN or not provided |
+  | ALERT → ALLOW_UNVERIFIED | 7 | as above, but behavioral PENDING |
+  | NEEDS_REVIEW → ALLOW | 10 | static ALLOW, the only error is a memory or network model error |
+  | NEEDS_REVIEW → ALLOW_UNVERIFIED | 5 | as above, but behavioral PENDING |
+
+- **Consequences:**
+  - Final BLOCK becomes unreachable.
+  - Outcomes citing `memory_malicious` or `network_malicious`: 112 → 0.
+  - `corroborated_multi_signal`: 80 → 0.
+  - TERMINATE is never removed. It only loses the `corroborated_multi_signal`
+    and `*_scan_error` reason codes.
+
+The default stays `true` until the static BLOCK path is decided. Turning the
+flag off makes static BLOCK unreachable, so the two decisions belong together.
+Tests: `tests/test_file_scan_detach.py`.
+
 ## Running a scan end-to-end
 ```python
 from models.behavioral_artifacts import load_behavioral_model
