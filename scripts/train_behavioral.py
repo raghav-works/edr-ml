@@ -23,6 +23,7 @@ import logging
 import numpy as np
 import pandas as pd
 
+from models.behavioral_artifacts import sidecar_path
 from models.behavioral_cnn import TrainConfig
 from models.train_behavioral import train
 from tokenizer.api_tokenizer import ApiTokenizer
@@ -61,8 +62,10 @@ def main() -> None:
     )
 
     cfg = TrainConfig(vocab_size=tokenizer.vocab_size, embed_dim=args.embed_dim)
-    model = train(X_train, y_train, X_val, y_val, cfg, checkpoint_path=args.checkpoint_out, pos_weight=pos_weight)
-    logger.info("Training complete, best checkpoint at %s", args.checkpoint_out)
+    model = train(X_train, y_train, X_val, y_val, cfg, checkpoint_path=args.checkpoint_out,
+                  pos_weight=pos_weight, vocab_path=args.vocab_out)
+    logger.info("Training complete, best checkpoint at %s (sidecar %s, use_padding_mask=%s)",
+                args.checkpoint_out, sidecar_path(args.checkpoint_out), cfg.use_padding_mask)
 
 
 if __name__ == "__main__":

@@ -671,12 +671,10 @@ def _behavioral_bands(lengths: np.ndarray, min_seq: int, max_seq: int) -> dict[s
 
 def evaluate_behavioral(limit: Optional[int] = None,
                         cfg: PrevalenceConfig = PrevalenceConfig()) -> dict:
-    import torch
-
     from inference import policy_engine as pe
-    from models.behavioral_cnn import CortexBehavioralNet, SEQUENCE_LENGTH
+    from models.behavioral_artifacts import load_behavioral_model
     from models.train_behavioral import predict_proba_behavioral
-    from tokenizer.api_tokenizer import MAX_SEQ_LEN, MIN_SEQ_LEN, ApiTokenizer
+    from tokenizer.api_tokenizer import MAX_SEQ_LEN, MIN_SEQ_LEN
 
     thr = pe.BEHAVIORAL_MALICIOUS_MIN
     logger.info("=" * 78)
@@ -685,12 +683,10 @@ def evaluate_behavioral(limit: Optional[int] = None,
     logger.info("   sequence-length bands (raw api_calls length): too_short <%d | short %d-%d | ok+truncated >=%d",
                 MIN_SEQ_LEN, MIN_SEQ_LEN, MAX_SEQ_LEN - 1, MAX_SEQ_LEN)
 
-    tokenizer = ApiTokenizer.load(BEHAVIORAL_VOCAB)
-    # Deployed checkpoint is embed_dim=128 (scripts/train_behavioral.py default).
-    model = CortexBehavioralNet(vocab_size=tokenizer.vocab_size,
-                                sequence_length=SEQUENCE_LENGTH, embed_dim=128)
-    model.load_state_dict(torch.load(BEHAVIORAL_CKPT, map_location="cpu"))
-    model.eval()
+    # Architecture (incl. use_padding_mask) comes from the checkpoint's
+    # sidecar, hashes verified (docs/CODE_REVIEW.md F2).
+    model, tokenizer = load_behavioral_model(BEHAVIORAL_CKPT, BEHAVIORAL_VOCAB)
+    logger.info("   use_padding_mask = %s (from sidecar)", model.use_padding_mask)
 
     out = {"threshold": thr, "splits": {}, "prevalence": {}}
     for split, path in (("val", BEHAVIORAL_VAL), ("test", BEHAVIORAL_TEST)):

@@ -57,7 +57,15 @@ def train(
     cfg: TrainConfig,
     checkpoint_path: Optional[str] = None,
     pos_weight: Optional[float] = None,
+    vocab_path: Optional[str] = None,
 ) -> CortexBehavioralNet:
+    """`checkpoint_path` and `vocab_path` go together: every saved checkpoint
+    gets a JSON sidecar (models/behavioral_artifacts.py, docs/CODE_REVIEW.md
+    F2) recording the architecture switches and the sha256 of the checkpoint
+    and of the vocabulary it was trained with."""
+    if checkpoint_path and not vocab_path:
+        raise ValueError("vocab_path is required with checkpoint_path: the checkpoint "
+                         "sidecar records the vocabulary's sha256")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = build_model(cfg, device=str(device))
 
@@ -104,6 +112,7 @@ def train(
             patience_counter = 0
             if checkpoint_path:
                 torch.save(best_state, checkpoint_path)
+                _write_sidecar(checkpoint_path, vocab_path, cfg)
         else:
             patience_counter += 1
             if patience_counter >= cfg.patience:
@@ -113,6 +122,15 @@ def train(
     if best_state is not None:
         model.load_state_dict(best_state)
     return model.to(device)
+
+
+def _write_sidecar(checkpoint_path: str, vocab_path: str, cfg: TrainConfig) -> None:
+    from models.behavioral_artifacts import write_behavioral_sidecar
+    write_behavioral_sidecar(
+        checkpoint_path, vocab_path,
+        use_padding_mask=cfg.use_padding_mask, embed_dim=cfg.embed_dim,
+        num_heads=cfg.num_heads, vocab_size=cfg.vocab_size,
+    )
 
 
 @dataclass(frozen=True)

@@ -317,19 +317,15 @@ pytest
 ### Running a scan
 
 ```python
-import torch
-from models.behavioral_cnn import CortexBehavioralNet, SEQUENCE_LENGTH
+from models.behavioral_artifacts import load_behavioral_model
 from models.static_lgbm import LGBMModel
-from tokenizer.api_tokenizer import ApiTokenizer
 from inference.pipeline import CortexPipeline
 
 static_model = LGBMModel.load("data/models/cortex_static")
-tokenizer = ApiTokenizer.load("data/models/api_vocab.json")
-
-behavioral_model = CortexBehavioralNet(vocab_size=tokenizer.vocab_size,
-                                       sequence_length=SEQUENCE_LENGTH, embed_dim=128)
-behavioral_model.load_state_dict(torch.load("data/models/cortex_behavioral_best.pt", map_location="cpu"))
-behavioral_model.eval()
+# Builds the model with the forward pass recorded in the checkpoint's sidecar
+# (cortex_behavioral_best.meta.json) and verifies checkpoint + vocab sha256.
+behavioral_model, tokenizer = load_behavioral_model(
+    "data/models/cortex_behavioral_best.pt", "data/models/api_vocab.json")
 
 pipeline = CortexPipeline(static_model, behavioral_model, tokenizer)
 result = pipeline.scan(r"C:\Samples\application.exe",

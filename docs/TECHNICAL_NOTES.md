@@ -143,7 +143,7 @@ python -m scripts.train_behavioral \
 
 ## Export + quantize
 ```python
-from export.export_onnx import export_static_lgbm_to_onnx, export_behavioral_to_onnx
+from export.export_onnx import export_static_lgbm_to_onnx, export_behavioral_checkpoint_to_onnx
 from export.quantize import quantize_behavioral_int8, compare_accuracy, benchmark_latency
 
 # Takes the base model path (LGBMModel.save()'s <path>.lgbm + <path>.meta),
@@ -179,7 +179,8 @@ export_network_lgbm_to_onnx("data/models/cortex_network", "data/models/cortex_ne
 # the Cortex-Network section's "ONNX export" subsection before treating
 # this file as fully interchangeable with the Python model.
 
-export_behavioral_to_onnx(model, "data/models/cortex_behavioral.onnx")
+export_behavioral_checkpoint_to_onnx("data/models/cortex_behavioral_best.pt", "data/models/api_vocab.json",
+                                     "data/models/cortex_behavioral.onnx")  # forward pass from the sidecar (F2)
 quantize_behavioral_int8("data/models/cortex_behavioral.onnx", "data/models/cortex_behavioral_int8.onnx")
 compare_accuracy("data/models/cortex_behavioral.onnx", "data/models/cortex_behavioral_int8.onnx")
 benchmark_latency("data/models/cortex_behavioral_int8.onnx")
@@ -1077,23 +1078,69 @@ drivers) and add a tolerance only if real benign files need it.
 vectors are byte-identical to the two-parse path. `tests/test_pe_truncation.py`
 asserts exactly one `pefile.PE` construction per scan.
 
+## Behavioral checkpoint sidecar (F2)
+Commit 76c3534 (2026-09-22) added padding masking to `CortexBehavioralNet`
+(a `key_padding_mask` on the attention and a masked mean pool). It changed the
+forward pass without changing any parameter shape. The shipped checkpoint
+(`cortex_behavioral_best.pt`, mtime 2026-08-19 05:25 UTC) was trained with the
+pre-masking code, which is blob 1fe9c28 of `models/behavioral_cnn.py` at a035aa5.
+After 76c3534 the checkpoint loaded silently and was scored by a function it
+was never trained with.
+
+At 0.60 on val+test, 259 benign and 1554 malicious:
+
+| Forward pass | AUC | Benign FP | FPR [95% CP] | Recall |
+|---|---|---|---|---|
+| legacy (as trained) | 0.9967 | 1 | 0.0039 [0.0001, 0.0213] | 0.9801 |
+| masked (mismatched) | 0.9931 | 19 | 0.0734 [0.0447, 0.1122] | 0.9871 |
+
+The legacy row reproduces the recorded val numbers (TN 132, FP 1, FN 20, TP 758)
+and the recorded test numbers (TN 126, FP 0, FN 11, TP 765).
+
+What changed:
+- `CortexBehavioralNet(use_padding_mask=...)` keeps both forward passes.
+  `False` is the pre-76c3534 code, and a test checks it against `git show 76c3534^`.
+  The default is `True`, so new training is masked.
+- Every checkpoint has `<name>.meta.json` next to it. The file records:
+  - `use_padding_mask`, `embed_dim`, `num_heads`, `vocab_size`, `sequence_length`;
+  - the sha256 of the checkpoint and of the vocabulary;
+  - the model-code commit.
+  `models/train_behavioral.py` writes it after every checkpoint save, and
+  saving a checkpoint requires `vocab_path`.
+- `models.behavioral_artifacts.load_behavioral_model(ckpt, vocab)` is the only
+  supported loader. It is used by the evaluation scripts and by the ONNX export.
+  - It refuses to load without a sidecar.
+  - It fails loudly on a checkpoint or vocab sha256 mismatch, or on a malformed sidecar.
+  - It builds the recorded architecture and uses `weights_only=True` with a strict state_dict load.
+  - It returns the model in eval mode.
+- The shipped checkpoint's sidecar was back-filled once (it is gitignored like the checkpoint):
+  ```
+  python -m scripts.write_behavioral_sidecar \
+      --checkpoint data/models/cortex_behavioral_best.pt \
+      --vocab data/models/api_vocab.json \
+      --legacy-unmasked --embed-dim 128 \
+      --model-code-commit a035aa52cb9b755c323c0a915e72bddd6e068533
+  ```
+  The script checks that the stated commit's model code agrees with
+  `--legacy-unmasked` or `--masked`. It will not overwrite an existing sidecar
+  without `--force`.
+
+A deployment that copies `cortex_behavioral_best.pt` must also copy
+`cortex_behavioral_best.meta.json`. The ONNX export bakes in whichever forward
+pass the sidecar names. For the shipped checkpoint, fp32 and int8 parity
+against the legacy path is max |Δp| 3.7e-7 for fp32 and 6.6e-3 for int8, with 0 verdict flips.
+
 ## Running a scan end-to-end
 ```python
-import torch
-
-from models.behavioral_cnn import CortexBehavioralNet, SEQUENCE_LENGTH
+from models.behavioral_artifacts import load_behavioral_model
 from models.static_lgbm import LGBMModel
-from tokenizer.api_tokenizer import ApiTokenizer
 from inference.pipeline import CortexPipeline
 
 static_model = LGBMModel.load("data/models/cortex_static")
-
-tokenizer = ApiTokenizer.load("data/models/api_vocab.json")
-# checkpoint is a raw state_dict (see scripts/train_behavioral.py), not a
-# pickled full model -- construct the architecture first, then load into it.
-behavioral_model = CortexBehavioralNet(vocab_size=tokenizer.vocab_size, sequence_length=SEQUENCE_LENGTH, embed_dim=128)
-behavioral_model.load_state_dict(torch.load("data/models/cortex_behavioral_best.pt", map_location="cpu"))
-behavioral_model.eval()
+# Builds the model with the forward pass recorded in the checkpoint's sidecar
+# (cortex_behavioral_best.meta.json) and verifies checkpoint + vocab sha256.
+behavioral_model, tokenizer = load_behavioral_model(
+    "data/models/cortex_behavioral_best.pt", "data/models/api_vocab.json")
 
 pipeline = CortexPipeline(static_model, behavioral_model, tokenizer)
 result = pipeline.scan(r"C:\Samples\application.exe", api_calls_json_path=r"C:\Telemetry\api_calls.json")

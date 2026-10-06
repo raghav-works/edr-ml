@@ -426,6 +426,16 @@ def export_network_lgbm_to_onnx(model_path: str, output_path: str, num_features:
     )
 
 
+def export_behavioral_checkpoint_to_onnx(checkpoint_path: str, vocab_path: str, output_path: str,
+                                         opset: int = 17) -> None:
+    """Export a behavioral checkpoint via load_behavioral_model(), so the
+    graph uses the forward pass recorded in the checkpoint's sidecar
+    (docs/CODE_REVIEW.md F2) -- never whatever the current code defaults to."""
+    from models.behavioral_artifacts import load_behavioral_model
+    model, _ = load_behavioral_model(checkpoint_path, vocab_path)
+    export_behavioral_to_onnx(model, output_path, sequence_length=model.sequence_length, opset=opset)
+
+
 def export_behavioral_to_onnx(model: torch.nn.Module, output_path: str, sequence_length: int = 100,
                                opset: int = 17) -> None:
     model.eval().to("cpu")

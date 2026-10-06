@@ -16,21 +16,11 @@ import logging
 
 import numpy as np
 import pandas as pd
-import torch
 
-from models.behavioral_cnn import CortexBehavioralNet, SEQUENCE_LENGTH
+from models.behavioral_artifacts import load_behavioral_model
 from models.train_behavioral import evaluate_behavioral, predict_proba_behavioral
-from tokenizer.api_tokenizer import ApiTokenizer
 
 logger = logging.getLogger("cortex.scripts.evaluate_behavioral")
-
-
-def load_model(checkpoint_path: str, vocab_size: int, embed_dim: int = 128) -> CortexBehavioralNet:
-    model = CortexBehavioralNet(vocab_size=vocab_size, sequence_length=SEQUENCE_LENGTH, embed_dim=embed_dim)
-    state = torch.load(checkpoint_path, map_location="cpu")
-    model.load_state_dict(state)
-    model.eval()
-    return model
 
 
 def main() -> None:
@@ -39,13 +29,12 @@ def main() -> None:
     ap.add_argument("--test", required=True)
     ap.add_argument("--vocab", required=True)
     ap.add_argument("--checkpoint", required=True)
-    ap.add_argument("--embed-dim", type=int, default=128)
     ap.add_argument("--threshold", type=float, default=0.5)
     args = ap.parse_args()
 
     test_df = pd.read_parquet(args.test)
-    tokenizer = ApiTokenizer.load(args.vocab)
-    model = load_model(args.checkpoint, tokenizer.vocab_size, args.embed_dim)
+    # architecture (embed_dim, use_padding_mask) comes from the sidecar
+    model, tokenizer = load_behavioral_model(args.checkpoint, args.vocab)
 
     X_test, statuses = tokenizer.encode_batch(test_df["api_calls"].tolist())
     y_test = test_df["label"].to_numpy(dtype=np.float32)
