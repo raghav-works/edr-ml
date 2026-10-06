@@ -18,6 +18,7 @@ import numpy as np
 import pandas as pd
 
 from models.behavioral_artifacts import load_behavioral_model
+from models.sequence_artifacts import scorable_rows
 from models.train_behavioral import evaluate_behavioral, predict_proba_behavioral
 
 logger = logging.getLogger("cortex.scripts.evaluate_behavioral")
@@ -37,6 +38,11 @@ def main() -> None:
     model, tokenizer = load_behavioral_model(args.checkpoint, args.vocab)
 
     X_test, statuses = tokenizer.encode_batch(test_df["api_calls"].tolist())
+    # empty traces (all-padding rows) are PENDING, never scored
+    keep = scorable_rows(X_test)
+    logger.info("all-padding (empty-trace) rows -> PENDING, not scored: %d", int((~keep).sum()))
+    test_df = test_df[keep].reset_index(drop=True)
+    X_test = X_test[keep]
     y_test = test_df["label"].to_numpy(dtype=np.float32)
 
     logger.info("test=%d (%d malicious / %d benign)", len(y_test), int(y_test.sum()), int((1 - y_test).sum()))

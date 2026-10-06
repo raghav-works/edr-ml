@@ -18,6 +18,7 @@ from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
 from torch.utils.data import DataLoader, TensorDataset
 
 from models.behavioral_cnn import CortexBehavioralNet, TrainConfig, build_model
+from models.sequence_artifacts import check_scorable, scorable_rows
 
 logger = logging.getLogger("cortex.behavioral.train")
 
@@ -62,10 +63,13 @@ def train(
     """`checkpoint_path` and `vocab_path` go together: every saved checkpoint
     gets a JSON sidecar (models/behavioral_artifacts.py, docs/CODE_REVIEW.md
     F2) recording the architecture switches and the sha256 of the checkpoint
-    and of the vocabulary it was trained with."""
+    and of the vocabulary it was trained with. All-padding (empty-trace) rows
+    are dropped from train and val (no defined score under a masked model)."""
     if checkpoint_path and not vocab_path:
         raise ValueError("vocab_path is required with checkpoint_path: the checkpoint "
                          "sidecar records the vocabulary's sha256")
+    X_train, y_train = _drop_all_padding(X_train, y_train, "train")
+    X_val, y_val = _drop_all_padding(X_val, y_val, "val")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = build_model(cfg, device=str(device))
 
@@ -124,6 +128,15 @@ def train(
     return model.to(device)
 
 
+def _drop_all_padding(X: np.ndarray, y: np.ndarray, split: str) -> tuple[np.ndarray, np.ndarray]:
+    keep = scorable_rows(X)
+    n_drop = int((~keep).sum())
+    if n_drop:
+        logger.info("dropping %d all-padding (empty-trace) row(s) from %s before training", n_drop, split)
+        return X[keep], y[keep]
+    return X, y
+
+
 def _write_sidecar(checkpoint_path: str, vocab_path: str, cfg: TrainConfig) -> None:
     from models.behavioral_artifacts import write_behavioral_sidecar
     write_behavioral_sidecar(
@@ -160,7 +173,10 @@ class BehavioralMetricsReport:
 
 @torch.no_grad()
 def predict_proba_behavioral(model: nn.Module, X: np.ndarray, device: Optional[torch.device] = None,
-                              batch_size: int = 512) -> np.ndarray:
+                              batch_size: int = 512, include_all_padding: bool = False) -> np.ndarray:
+    """Refuses all-padding (empty-trace) rows, like predict_proba_emulation;
+    the pipeline already makes empty traces PENDING before scoring."""
+    check_scorable(X, model, include_all_padding)
     model.eval()
     device = device or next(model.parameters()).device
     out = np.empty(len(X), dtype=np.float64)

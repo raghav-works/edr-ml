@@ -57,6 +57,7 @@ from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
 from torch.utils.data import DataLoader, TensorDataset
 
 from models.emulation_cnn import CortexEmulationNet, TrainConfig, build_model
+from models.sequence_artifacts import check_scorable, scorable_rows
 
 logger = logging.getLogger("cortex.emulation.train")
 
@@ -163,6 +164,7 @@ def train(
     cfg: TrainConfig,
     checkpoint_path: Optional[str] = None,
     pos_weight: Optional[float] = None,
+    vocab_path: Optional[str] = None,
 ) -> tuple[CortexEmulationNet, TrainOutcome]:
     """Train on train only; early-stop on val ROC-AUC; restore best weights.
 
@@ -171,7 +173,19 @@ def train(
     separate from the dataset's `duplicate_count` column and the
     equal-sample-weighting decision made in scripts/split_emulation.py --
     duplicate_count plays no role in training (not a feature, not a weight).
+
+    `checkpoint_path` and `vocab_path` go together: every saved checkpoint
+    gets a JSON sidecar (models/emulation_artifacts.py) recording
+    use_padding_mask, the architecture and the checkpoint/vocabulary sha256.
+    All-padding (empty-trace) rows are dropped from train and val: they have
+    no defined score under a masked model (NaN loss) and are PENDING at
+    evaluation time.
     """
+    if checkpoint_path and not vocab_path:
+        raise ValueError("vocab_path is required with checkpoint_path: the checkpoint "
+                         "sidecar records the vocabulary's sha256")
+    X_train, y_train = _drop_all_padding(X_train, y_train, "train")
+    X_val, y_val = _drop_all_padding(X_val, y_val, "val")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = build_model(cfg, device=str(device))
 
@@ -234,6 +248,7 @@ def train(
             patience_counter = 0
             if checkpoint_path:
                 torch.save(best_state, checkpoint_path)
+                _write_sidecar(checkpoint_path, vocab_path, cfg)
         else:
             patience_counter += 1
 
@@ -272,6 +287,24 @@ def train(
     return model.to(device), outcome
 
 
+def _drop_all_padding(X: np.ndarray, y: np.ndarray, split: str) -> tuple[np.ndarray, np.ndarray]:
+    keep = scorable_rows(X)
+    n_drop = int((~keep).sum())
+    if n_drop:
+        logger.info("dropping %d all-padding (empty-trace) row(s) from %s before training", n_drop, split)
+        return X[keep], y[keep]
+    return X, y
+
+
+def _write_sidecar(checkpoint_path: str, vocab_path: str, cfg: TrainConfig) -> None:
+    from models.emulation_artifacts import write_emulation_sidecar
+    write_emulation_sidecar(
+        checkpoint_path, vocab_path,
+        use_padding_mask=cfg.use_padding_mask, embed_dim=cfg.embed_dim,
+        num_heads=cfg.num_heads, vocab_size=cfg.vocab_size,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Evaluation
 # ---------------------------------------------------------------------------
@@ -300,7 +333,13 @@ class EmulationMetricsReport:
 @torch.no_grad()
 def predict_proba_emulation(
     model: nn.Module, X: np.ndarray, device: Optional[torch.device] = None, batch_size: int = 512,
+    include_all_padding: bool = False,
 ) -> np.ndarray:
+    """Refuses all-padding (empty-trace) rows -- filter them with
+    models.sequence_artifacts.scorable_rows() and report them as PENDING.
+    include_all_padding=True is accepted only for a legacy unmasked model,
+    for the 'model-raw' line that reproduces pre-masking records."""
+    check_scorable(X, model, include_all_padding)
     model.eval()
     device = device or next(model.parameters()).device
     out = np.empty(len(X), dtype=np.float64)

@@ -25,24 +25,20 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import subprocess
 import sys
 from pathlib import Path
 
 from models.behavioral_artifacts import sidecar_path, write_behavioral_sidecar
+from models.sequence_artifacts import model_code_at
 from tokenizer.api_tokenizer import ApiTokenizer
 
 
 def _model_code_sha256_at(commit: str) -> str:
-    blob = subprocess.run(["git", "show", f"{commit}:models/behavioral_cnn.py"],
-                          capture_output=True, check=True).stdout
-    return hashlib.sha256(blob).hexdigest()
+    return hashlib.sha256(model_code_at(commit, "models/behavioral_cnn.py")).hexdigest()
 
 
 def _has_padding_mask(commit: str) -> bool:
-    src = subprocess.run(["git", "show", f"{commit}:models/behavioral_cnn.py"],
-                         capture_output=True, text=True, check=True).stdout
-    return "key_padding_mask" in src
+    return b"key_padding_mask" in model_code_at(commit, "models/behavioral_cnn.py")
 
 
 def main(argv=None) -> int:

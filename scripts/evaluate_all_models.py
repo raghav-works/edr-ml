@@ -658,6 +658,33 @@ def evaluate_network(limit: Optional[int] = None,
 
 
 # ---------------------------------------------------------------------------
+# Sequence models (4, 5): all-padding (empty-trace) rows
+# ---------------------------------------------------------------------------
+def _score_sequences(model, X: np.ndarray, predict) -> tuple[np.ndarray, np.ndarray]:
+    """(proba, scorable). An all-padding row is an empty trace: never part
+    of a deployment number (PENDING). A legacy unmasked model still gives it
+    a finite score, used only for the 'model-raw' lines that reproduce the
+    pre-masking records; under a masked model it has no defined score and
+    its proba stays NaN (excluded everywhere)."""
+    from models.sequence_artifacts import scorable_rows
+    scorable = scorable_rows(X)
+    if not model.use_padding_mask:
+        return predict(model, X, include_all_padding=True), scorable
+    proba = np.full(len(X), np.nan)
+    if scorable.any():
+        proba[scorable] = predict(model, X[scorable])
+    return proba, scorable
+
+
+def _log_pending(y: np.ndarray, scorable: np.ndarray) -> int:
+    pend = ~scorable
+    n = int(pend.sum())
+    logger.info("  PENDING (all-padding / empty trace, not scored): %d  (%d benign / %d malicious)",
+                n, int((y[pend] == 0).sum()), int((y[pend] == 1).sum()))
+    return n
+
+
+# ---------------------------------------------------------------------------
 # 4. Cortex-Behavioral
 # ---------------------------------------------------------------------------
 def _behavioral_bands(lengths: np.ndarray, min_seq: int, max_seq: int) -> dict[str, np.ndarray]:
@@ -697,14 +724,23 @@ def evaluate_behavioral(limit: Optional[int] = None,
         lengths = np.array([len(s) for s in seqs])
         X, _statuses = tokenizer.encode_batch(seqs)
         y = df["label"].to_numpy(dtype=np.int32)
-        proba = predict_proba_behavioral(model, X)
+        # An empty trace is an all-padding row: PENDING in deployment (the
+        # too_short band already is), and under a masked checkpoint it has
+        # no defined score -- it is then left out of the model-raw lines too.
+        proba, scorable = _score_sequences(model, X, predict_proba_behavioral)
+        finite = ~np.isnan(proba)
 
         bands = _behavioral_bands(lengths, MIN_SEQ_LEN, MAX_SEQ_LEN)
         logger.info("-" * 78)
         logger.info(" split=%s  (%s)   n=%d", split, path, len(y))
+        n_empty = int((~scorable).sum())
+        if n_empty:
+            _log_pending(y, scorable)
+            if model.use_padding_mask:
+                logger.info("  (masked checkpoint: those %d row(s) are excluded from the model-raw lines)", n_empty)
         band_evs = {}
         for band in BEH_BANDS:
-            m = bands[band]
+            m = bands[band] & finite
             n = int(m.sum())
             if n == 0:
                 logger.info("   band=%-13s (n=0, skipped)", band)
@@ -718,7 +754,7 @@ def evaluate_behavioral(limit: Optional[int] = None,
         # Deployment total = short + ok+truncated (what the pipeline scores).
         dep_mask = bands["short"] | bands["ok+truncated"]
         dep_ev = binary_eval(y[dep_mask], proba[dep_mask], thr)
-        raw_ev = binary_eval(y, proba, thr)
+        raw_ev = binary_eval(y[finite], proba[finite], thr)
         logger.info("   ---")
         print_binary("TOTAL (deployment: short+ok)", dep_ev)
         print_binary("TOTAL (all rows, model-raw)", raw_ev)
@@ -754,25 +790,20 @@ def evaluate_emulation(limit: Optional[int] = None,
         logger.info("5. CORTEX-EMULATION  -- SKIPPED (checkpoint or splits absent)")
         return None
 
-    import torch
-
     from inference import policy_engine as pe
-    from models.emulation_cnn import CortexEmulationNet, SEQUENCE_LENGTH
+    from models.emulation_artifacts import load_emulation_model
     from models.train_emulation import predict_proba_emulation
-    from tokenizer.emulation_tokenizer import EmulationTokenizer
 
     thr = pe.EMULATION_MALICIOUS_MIN
     logger.info("=" * 78)
     logger.info("5. CORTEX-EMULATION  (%s)   *** REPORT-ONLY / NOT IN ANY LIVE DECISION PATH ***", EMULATION_CKPT)
     logger.info("   EMULATION_MALICIOUS_MIN = %.16f  (telemetry EmulationVerdict only; never reaches decide())", thr)
 
-    tokenizer = EmulationTokenizer.load(EMULATION_VOCAB)
-    # e64 checkpoint (config/thresholds.yaml references cortex_emulation_best.pt).
-    model = CortexEmulationNet(vocab_size=tokenizer.vocab_size,
-                               sequence_length=SEQUENCE_LENGTH, embed_dim=64)
-    # weights_only: tensors only, no pickled code (docs/CODE_REVIEW.md F24)
-    model.load_state_dict(torch.load(EMULATION_CKPT, map_location="cpu", weights_only=True))
-    model.eval()
+    # Architecture (incl. use_padding_mask) comes from the checkpoint's
+    # sidecar, hashes verified (same defect as docs/CODE_REVIEW.md F2: masking
+    # in b876d26 postdates the shipped checkpoint).
+    model, tokenizer = load_emulation_model(EMULATION_CKPT, EMULATION_VOCAB)
+    logger.info("   use_padding_mask = %s (from sidecar)", model.use_padding_mask)
 
     out = {"threshold": thr, "splits": {}}
     for split, path in (("val", EMULATION_VAL), ("test", EMULATION_TEST)):
@@ -780,14 +811,26 @@ def evaluate_emulation(limit: Optional[int] = None,
         if limit:
             df = df.iloc[:limit]
         seqs = [list(s) for s in df["api_names"].tolist()]
+        lengths = np.array([len(s) for s in seqs])
         X, _statuses = tokenizer.encode_batch(seqs)
         y = df["label"].to_numpy(dtype=np.int32)
-        proba = predict_proba_emulation(model, X)
-        ev = binary_eval(y, proba, thr)
+        proba, scorable = _score_sequences(model, X, predict_proba_emulation)
         logger.info("-" * 78)
-        logger.info(" split=%s  (%s)", split, path)
-        print_binary("@ EMULATION_MALICIOUS_MIN", ev)
-        out["splits"][split] = ev
+        logger.info(" split=%s  (%s)   n=%d", split, path, len(y))
+        n_pending = _log_pending(y, scorable)
+        n_1_9 = int(((lengths >= 1) & (lengths < 10)).sum())
+        logger.info("  info only: rows with 1-9 API calls: %d  (scored; no rule applies to them)", n_1_9)
+        dep_ev = binary_eval(y[scorable], proba[scorable], thr)
+        print_binary("@ EMULATION_MALICIOUS_MIN (deployment: scored rows)", dep_ev)
+        if model.use_padding_mask:
+            raw_ev = None
+            logger.info("  %-28s n/a (masked checkpoint; all-padding rows have no defined score)",
+                        "@ EMULATION_MALICIOUS_MIN (all rows, model-raw)")
+        else:
+            raw_ev = binary_eval(y, proba, thr)
+            print_binary("@ EMULATION_MALICIOUS_MIN (all rows, model-raw)", raw_ev)
+        out["splits"][split] = {"deployment": dep_ev, "model_raw": raw_ev,
+                                "pending": n_pending, "calls_1_9": n_1_9}
     return out
 
 

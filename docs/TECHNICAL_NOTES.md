@@ -1130,6 +1130,64 @@ A deployment that copies `cortex_behavioral_best.pt` must also copy
 pass the sidecar names. For the shipped checkpoint, fp32 and int8 parity
 against the legacy path is max |Δp| 3.7e-7 for fp32 and 6.6e-3 for int8, with 0 verdict flips.
 
+## Emulation checkpoint sidecar (F2 follow-up)
+Cortex-Emulation had the same defect as F2. Commit `b876d26` (2026-09-22) added
+padding masking to `models/emulation_cnn.py`. The shipped
+`cortex_emulation_best.pt` (mtime 2026-08-27 05:37 UTC) was trained with the
+unmasked code: blob `dab52a7` of `models/emulation_cnn.py`, committed in `9331159`,
+which was the only version before `b876d26`.
+
+Under the masked code:
+- val came out at TN/FP/FN/TP 442/8/71/154, against the recorded 440/10/66/159;
+- the one empty test trace scored NaN, which crashed `scripts.evaluate_all_models`.
+
+What changed:
+- **Two forward passes.** `CortexEmulationNet(use_padding_mask=...)` keeps both.
+  `False` is bit-identical to `git show b876d26^`, which a test checks. The
+  default is `True`, so new training is masked.
+- **One loader.** `models.emulation_artifacts.load_emulation_model(ckpt, vocab)`
+  is the only supported loader. Its sidecar `<name>.meta.json` uses the same
+  format as behavioral's, through the shared `models/sequence_artifacts.py`;
+  the behavioral sidecar format is unchanged.
+  - It refuses to load without a sidecar.
+  - It checks the sha256 of the checkpoint and the vocabulary.
+  - It builds the recorded architecture and uses `weights_only=True`.
+  - It refuses a sidecar written for the other model class.
+- **Training writes the sidecar.** `train()` in `models/train_emulation.py`
+  writes it after every checkpoint save, and saving a checkpoint requires
+  `vocab_path`.
+- **Back-fill for the shipped checkpoint**, done once (gitignored, like the checkpoint):
+  ```
+  python -m scripts.write_emulation_sidecar \
+      --checkpoint data/models/cortex_emulation_best.pt \
+      --vocab data/models/emulation_vocab.json \
+      --legacy-unmasked --embed-dim 64 \
+      --model-code-commit 9331159d3dcec714618ee65adf2139e9d734c887
+  ```
+  - `emulation_vocab.json` (mtime 05:54) is newer than the checkpoint. A later
+    run on the same train split rewrote it. Two checks confirm it fits: the
+    strict load (embedding size equals vocab size), and exact reproduction of
+    the recorded val and test numbers.
+  - `cortex_emulation_best_e32.pt` has no sidecar, because nothing loads it.
+
+**Empty traces, both sequence models.** A row with no real token is an empty
+trace. Under a masked model every attention key is masked, so it scores NaN.
+- It is never scored; it is counted as PENDING, matching behavioral's too_short band.
+- `predict_proba_emulation` and `predict_proba_behavioral` refuse such rows.
+  `include_all_padding=True` overrides this, but only for a legacy unmasked
+  model, and only to print the "model-raw" line.
+- Training drops them and logs the count. Emulation train has 1; behavioral has none.
+- `scripts.evaluate_all_models` prints, per emulation split:
+  - the PENDING count;
+  - the number of 1–9-call rows (for information only);
+  - a deployment line over scored rows;
+  - the model-raw line, which equals the recorded numbers.
+- Test split, as an example:
+  - PENDING is 1 (benign).
+  - The deployment line is TN 1922, n 2494.
+  - The model-raw line is TN 1923, n 2495, the same as the record.
+- Behavioral has no empty traces in any split, so its output is unchanged.
+
 ## Model metadata is JSON, hash-checked (F24)
 The LightGBM `.meta` files and `MemoryFeatureScaler` used to be pickles, and
 unpickling runs arbitrary code. A replaced `.meta` therefore meant code

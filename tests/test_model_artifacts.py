@@ -219,7 +219,8 @@ def test_loaders_never_unpickle():
     script is the one deliberate exception)."""
     for rel in ("models/static_lgbm.py", "models/memory_lgbm.py", "models/network_lgbm.py",
                 "models/lgbm_artifacts.py", "features/memory_features.py",
-                "models/behavioral_artifacts.py"):
+                "models/behavioral_artifacts.py", "models/emulation_artifacts.py",
+                "models/sequence_artifacts.py"):
         tree = ast.parse((_ROOT / rel).read_text(encoding="utf-8"))
         imported = {a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
         imported |= {n.module for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) and n.module}

@@ -140,4 +140,8 @@ def test_emulation_evaluator_is_report_only_but_runs():
         pytest.skip("emulation checkpoint / splits absent")
     assert set(res["splits"]) == {"val", "test"}
     for split in ("val", "test"):
-        _check_binary_eval(res["splits"][split])
+        s = res["splits"][split]
+        _check_binary_eval(s["deployment"])
+        if s["model_raw"] is not None:  # legacy unmasked checkpoint
+            _check_binary_eval(s["model_raw"])
+            assert s["model_raw"].n == s["deployment"].n + s["pending"]

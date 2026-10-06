@@ -116,9 +116,17 @@ class CortexEmulationNet(nn.Module):
         num_heads: int = 4,
         dropout: float = 0.4,
         pad_idx: int = 0,
+        use_padding_mask: bool = True,
     ) -> None:
         super().__init__()
         self.sequence_length = sequence_length
+        # True: <PAD> positions are excluded from attention and pooling
+        # (commit b876d26). False: the forward pass as it was before b876d26
+        # (unmasked attention, plain mean over all 500 slots) -- required for
+        # checkpoints trained with that code. Both paths have identical
+        # parameters, so a state_dict loads into either; only the checkpoint's
+        # sidecar says which is right (same defect as docs/CODE_REVIEW.md F2).
+        self.use_padding_mask = use_padding_mask
         self.embedding = nn.Embedding(vocab_size, embed_dim, padding_idx=pad_idx)
         self.pos_embedding = nn.Parameter(torch.randn(1, sequence_length, embed_dim) * 0.02)
 
@@ -163,14 +171,19 @@ class CortexEmulationNet(nn.Module):
         noise at every unused slot, the same dilution fixed for Behavioral
         in models/behavioral_cnn.py (commit 76c3534).
         """
-        pad_mask = token_ids.eq(self.embedding.padding_idx)  # (B, seq), True at <PAD>
         x = self.embedding(token_ids) + self.pos_embedding[:, : token_ids.size(1), :]
         x = x.permute(0, 2, 1)          # (B, embed_dim, seq)
         x = self.conv_stack(x)          # (B, 128, seq)
         x = x.permute(0, 2, 1)          # (B, seq, 128)
-        x = self.attention(x, key_padding_mask=pad_mask)
-        real_mask = (~pad_mask).unsqueeze(-1).to(x.dtype)      # (B, seq, 1)
-        x = (x * real_mask).sum(dim=1) / real_mask.sum(dim=1).clamp(min=1.0)  # masked mean pool
+        if self.use_padding_mask:
+            pad_mask = token_ids.eq(self.embedding.padding_idx)  # (B, seq), True at <PAD>
+            x = self.attention(x, key_padding_mask=pad_mask)
+            real_mask = (~pad_mask).unsqueeze(-1).to(x.dtype)      # (B, seq, 1)
+            x = (x * real_mask).sum(dim=1) / real_mask.sum(dim=1).clamp(min=1.0)  # masked mean pool
+        else:
+            # legacy (pre-b876d26): no attention mask, mean over every slot
+            x = self.attention(x)
+            x = x.mean(dim=1)
         logits = self.classifier(x).squeeze(-1)  # (B,)
         return logits
 
@@ -196,6 +209,7 @@ class TrainConfig:
     patience: int = 15
     grad_clip: float = 1.0
     seed: int = DEFAULT_SEED
+    use_padding_mask: bool = True  # every newly trained checkpoint uses masking
 
 
 def build_model(cfg: TrainConfig, device: Optional[str] = None) -> CortexEmulationNet:
@@ -203,6 +217,7 @@ def build_model(cfg: TrainConfig, device: Optional[str] = None) -> CortexEmulati
     model = CortexEmulationNet(
         vocab_size=cfg.vocab_size, sequence_length=SEQUENCE_LENGTH,
         embed_dim=cfg.embed_dim, num_heads=cfg.num_heads, dropout=cfg.dropout,
+        use_padding_mask=cfg.use_padding_mask,
     )
     dev = device or ("cuda" if torch.cuda.is_available() else "cpu")
     return model.to(dev)

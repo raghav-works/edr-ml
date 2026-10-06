@@ -35,6 +35,8 @@ import pandas as pd
 import torch
 
 from models.emulation_cnn import TrainConfig
+from models.emulation_artifacts import sidecar_path
+from models.sequence_artifacts import scorable_rows
 from models.train_emulation import (
     evaluate_emulation, predict_proba_emulation, threshold_sweep, train,
 )
@@ -131,9 +133,19 @@ def main() -> None:
     t0 = time.monotonic()
     model, outcome = train(
         X_train, y_train, X_val, y_val, cfg,
-        checkpoint_path=args.checkpoint_out, pos_weight=pos_weight,
+        checkpoint_path=args.checkpoint_out, pos_weight=pos_weight, vocab_path=args.vocab_out,
     )
     wall = time.monotonic() - t0
+    logger.info("best checkpoint at %s (sidecar %s, use_padding_mask=%s)",
+                args.checkpoint_out, sidecar_path(args.checkpoint_out), cfg.use_padding_mask)
+
+    # All-padding (empty-trace) rows have no defined score: PENDING, not scored.
+    for name, Xs, ys in (("val", X_val, y_val), ("test", X_test, y_test)):
+        n_pend = int((~scorable_rows(Xs)).sum())
+        logger.info("%s: %d all-padding (empty-trace) row(s) -> PENDING, excluded from scoring", name, n_pend)
+    keep_val, keep_test = scorable_rows(X_val), scorable_rows(X_test)
+    X_val, y_val = X_val[keep_val], y_val[keep_val]
+    X_test, y_test = X_test[keep_test], y_test[keep_test]
 
     # --- training-curve summary ---
     logger.info("\n=== Training curve (per epoch) ===")
