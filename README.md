@@ -311,8 +311,20 @@ python -m scripts.evaluate_all_models
 python -m scripts.verify_onnx_parity
 
 # 7. Run the tests
-pytest
+pytest            # fast suite (~30 s); slow tests are deselected by default
+pytest -m slow    # tests against the real models and data (~4 min)
 ```
+
+`pytest.ini` deselects tests marked `slow`. These tests load the real model
+files and data splits. They check:
+- confusion matrices;
+- ONNX parity;
+- the threshold-to-model hash pins.
+
+They skip themselves when those artifacts are absent. Both `pytest` and
+`pytest -m slow` must pass, with 0 failed and 0 errors, before every commit and
+in every release check. A green `pytest` alone does not cover the deployed
+models.
 
 ### Running a scan
 
