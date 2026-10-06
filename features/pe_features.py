@@ -771,14 +771,20 @@ class PEFeatureExtractor:
         self.dim = sum(g.dim for g in self._groups)
         assert self.dim == EMBER2024_FEATURE_COUNT, f"dim mismatch: {self.dim} != {EMBER2024_FEATURE_COUNT}"
 
-    def _parse(self, bytez: bytes) -> Optional["pefile.PE"]:
+    def parse(self, bytez: bytes) -> Optional["pefile.PE"]:
+        """Full pefile parse, or None if `bytez` is not a PE. The pipeline
+        parses once with this and hands the object to truncation_findings()
+        and feature_vector_with_report(pe=...); the caller owns and closes it."""
         try:
             return pefile.PE(data=bytez, fast_load=False)
         except Exception as exc:
             logger.info("pefile parse failed: %s", exc)
             return None
 
-    def raw_features(self, bytez: bytes, *, _degraded: Optional[list] = None) -> Dict[str, Any]:
+    _parse = parse  # backward-compatible private name
+
+    def raw_features(self, bytez: bytes, *, pe: Optional["pefile.PE"] = None,
+                     _degraded: Optional[list] = None) -> Dict[str, Any]:
         """Per-group raw feature extraction.
 
         `_degraded` (keyword-only, internal): if a list is passed, the name of
@@ -788,8 +794,14 @@ class PEFeatureExtractor:
         authenticode group, when signify set parse_error=1. Public callers
         (features/ember2024_adapter.py, tests) pass nothing and get the same
         dict as before.
+
+        `pe` (keyword-only): an already-parsed pefile.PE for these exact
+        bytes, so the file is not parsed twice. When given, the caller owns
+        it and this method does not close it.
         """
-        pe = self._parse(bytez)
+        owns_pe = pe is None
+        if owns_pe:
+            pe = self.parse(bytez)
         out = {"sha256": hashlib.sha256(bytez).hexdigest()}
         for g in self._groups:
             try:
@@ -815,7 +827,7 @@ class PEFeatureExtractor:
         if isinstance(auth, dict) and auth.get("parse_error"):
             if _degraded is not None and "authenticode" not in _degraded:
                 _degraded.append("authenticode")
-        if pe is not None:
+        if owns_pe and pe is not None:
             try:
                 pe.close()
             except Exception:
@@ -855,13 +867,15 @@ class PEFeatureExtractor:
     def feature_vector(self, bytez: bytes) -> np.ndarray:
         return self.feature_vector_with_report(bytez)[0]
 
-    def feature_vector_with_report(self, bytez: bytes) -> "tuple[np.ndarray, list[str]]":
+    def feature_vector_with_report(self, bytez: bytes, *, pe: Optional["pefile.PE"] = None,
+                                   ) -> "tuple[np.ndarray, list[str]]":
         """Like feature_vector(), but also returns the sorted list of feature
         groups that had to be degraded (raised and fell back to zeros/defaults)
         -- review item 6. An empty list means every group extracted cleanly.
+        `pe`: optional pre-parsed object for `bytez` (see raw_features()).
         """
         degraded: list[str] = []
-        raw = self.raw_features(bytez, _degraded=degraded)
+        raw = self.raw_features(bytez, pe=pe, _degraded=degraded)
         vec = self.process_raw_features(raw, _degraded=degraded)
         return vec, sorted(set(degraded))
 
@@ -911,5 +925,40 @@ class PEFeatureExtractor:
         return failures
 
     def is_valid_pe(self, bytez: bytes) -> bool:
-        """Rule-based PE validation gate (stage 3 of the architecture)."""
-        return self._parse(bytez) is not None
+        """Rule-based PE validation gate (stage 3 of the architecture).
+        Parses the file; the pipeline uses parse() directly instead so the
+        parsed object can be reused."""
+        return self.parse(bytez) is not None
+
+
+def truncation_findings(pe: "pefile.PE", file_size: int) -> List[str]:
+    """docs/CODE_REVIEW.md F17: structural signs that the file on disk is
+    cut short. Returns machine-parseable detail codes (empty == not
+    truncated):
+
+      pe_truncated:section_raw_beyond_eof:<bytes>  -- some section with
+          SizeOfRawData > 0 has PointerToRawData + SizeOfRawData past EOF;
+          <bytes> is the largest overrun. Zero tolerance.
+      pe_truncated:headers_beyond_eof              -- SizeOfHeaders > file size
+      pe_truncated:certificate_table_beyond_eof    -- the security directory
+          (a FILE OFFSET, not an RVA) has Size > 0 and ends past EOF
+
+    Measured before adoption (docs/TECHNICAL_NOTES.md): 0 hits on 126 benign
+    PEs. pefile's own warnings are deliberately not used.
+    """
+    findings: List[str] = []
+    overruns = [
+        s.PointerToRawData + s.SizeOfRawData - file_size
+        for s in pe.sections
+        if s.SizeOfRawData > 0 and s.PointerToRawData + s.SizeOfRawData > file_size
+    ]
+    if overruns:
+        findings.append(f"pe_truncated:section_raw_beyond_eof:{max(overruns)}")
+    if pe.OPTIONAL_HEADER.SizeOfHeaders > file_size:
+        findings.append("pe_truncated:headers_beyond_eof")
+    data_dirs = pe.OPTIONAL_HEADER.DATA_DIRECTORY
+    if len(data_dirs) > 4:  # IMAGE_DIRECTORY_ENTRY_SECURITY
+        sec = data_dirs[4]
+        if sec.Size > 0 and sec.VirtualAddress + sec.Size > file_size:
+            findings.append("pe_truncated:certificate_table_beyond_eof")
+    return findings

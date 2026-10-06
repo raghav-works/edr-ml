@@ -265,7 +265,7 @@ def _force_report(monkeypatch, pipe, degraded):
     vector) without needing a real extraction failure."""
     monkeypatch.setattr(
         pipe.feature_extractor, "feature_vector_with_report",
-        lambda bytez: (np.zeros(2568, dtype=np.float32), list(degraded)),
+        lambda bytez, **_kw: (np.zeros(2568, dtype=np.float32), list(degraded)),
     )
 
 

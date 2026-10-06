@@ -1020,6 +1020,56 @@ deferred until the model itself is worth shipping). No pipeline wiring in
 block) — not pursued, since the larger capacity cut (`embed_dim` halving)
 already made things worse, not better.
 
+## Truncated PE files (F17)
+
+`docs/CODE_REVIEW.md` F17: `pefile` happily parses a PE cut off after its
+headers, and the static model then scores features of a file that does not
+exist (in the review, a 1 KB truncated header scored ALLOW with no
+degraded feature groups).
+`features.pe_features.truncation_findings()` now runs on the pipeline's single
+`pefile` parse, before the allowlist and before the model. Any hit sets static
+`ERROR` → `NEEDS_REVIEW` with reason `static_pe_truncated` and one detail code
+per rule (see the README policy notes for the exact codes).
+
+**Rules adopted**
+
+| Rule | Test | Tolerance |
+|---|---|---|
+| R1 | any section with `SizeOfRawData > 0` and `PointerToRawData + SizeOfRawData > file size` | **zero**; the largest overrun in bytes is recorded in the reason code |
+| R2 | `OPTIONAL_HEADER.SizeOfHeaders > file size` | zero |
+| R3 | `DATA_DIRECTORY[SECURITY]` (a file offset, not an RVA): `Size > 0` and `VirtualAddress + Size > file size` | zero |
+
+**Measurement before adoption (2026-10-06, read-only, nothing executed).**
+126 unique (by sha256) benign PEs on the development machine: the 4 test
+fixtures (including the self-test reference `sample_signed64.exe`), ~20
+setuptools/pip/distlib launchers from several virtualenvs, and ~100 in-house
+MSVC/MinGW build outputs, Qt/OpenSSL/gtest DLLs and WiX installers (signed and
+unsigned, up to 66 MB with overlays).
+
+| Candidate | Hits on 126 benign | Hits on truncated fixtures (1 KB / 4 KB / half) | Decision |
+|---|---|---|---|
+| R1 section raw data beyond EOF | 0 | 12/12 | adopted |
+| R2 SizeOfHeaders beyond EOF | 0 | 0/12 (0x400 headers survive a 1 KB cut) | adopted |
+| R3 certificate table beyond EOF | 0 | 3/3 signed copies | adopted |
+| R4a pefile warnings `SizeOfRawData is larger than file` / `PointerToRawData points beyond the end of the file` | 0 | 12/12 | dropped: duplicates R1 |
+| R4b pefile warning `This may indicate truncation / malformation` (byte dominance) | **2** (`gtest.dll`, `gmock.dll`) | 4/12 | dropped: fires on normal zero-heavy DLLs |
+| R5 data directory RVA mapped beyond EOF | 0 | 12/12, always with R1 | dropped: adds nothing over R1 |
+
+**Why zero tolerance on R1.** Some linkers/packers round the last section's
+`SizeOfRawData` up to `FileAlignment` without padding the file (the loader
+zero-fills the tail); a tolerance below `FileAlignment` was considered. No file
+in the sample overran at all, so zero tolerance was chosen for now and the
+overrun is recorded in the reason code. **Re-check R1–R3 hit rates on the
+Phase 2 benign benchmark** (wider toolchain coverage: Delphi/Borland, packers,
+drivers) and add a tolerance only if real benign files need it.
+
+**Parse once.** The pipeline previously parsed every file with `pefile` twice
+(`is_valid_pe()` then again inside feature extraction). It now calls
+`PEFeatureExtractor.parse()` once and passes the object to both
+`truncation_findings()` and `feature_vector_with_report(pe=...)`; feature
+vectors are byte-identical to the two-parse path. `tests/test_pe_truncation.py`
+asserts exactly one `pefile.PE` construction per scan.
+
 ## Running a scan end-to-end
 ```python
 import torch

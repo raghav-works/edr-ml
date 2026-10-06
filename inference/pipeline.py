@@ -60,7 +60,7 @@ import numpy as np
 
 from features.authenticode_trust import verify_trusted_chain
 from features.nsrl_allowlist import NSRLAllowlist
-from features.pe_features import CRITICAL_FEATURE_GROUPS, PEFeatureExtractor
+from features.pe_features import CRITICAL_FEATURE_GROUPS, PEFeatureExtractor, truncation_findings
 from inference.policy_engine import (
     BehavioralVerdict, FinalDecision, MemoryVerdict, NetworkVerdict, ScanResult, StaticVerdict,
     behavioral_verdict_from_score, decide, memory_verdict_from_score,
@@ -191,10 +191,40 @@ class CortexPipeline:
             return result
         result.sha256 = hashlib.sha256(bytez).hexdigest()
 
-        # 3. rule-based Windows PE validation
-        if not self.feature_extractor.is_valid_pe(bytez):
+        # 3. rule-based Windows PE validation. The file is parsed exactly once
+        # here; the same pefile object feeds the truncation check (3a) and
+        # feature extraction (4) and is closed when this scan is done.
+        pe = self.feature_extractor.parse(bytez)
+        if pe is None:
             result.static_verdict = StaticVerdict.ERROR
             result.reason_codes.append("invalid_or_non_pe_file")
+            final, reasons = decide(result.static_verdict, result.behavioral_verdict,
+                                    result.memory_verdict, result.network_verdict)
+            result.final_decision, result.reason_codes = final, result.reason_codes + reasons
+            return result
+        try:
+            return self._scan_parsed(result, path, bytez, pe, api_calls_json_path)
+        finally:
+            try:
+                pe.close()
+            except Exception:
+                pass
+
+    # ------------------------------------------------------------------
+    def _scan_parsed(self, result: ScanResult, path: Path, bytez: bytes, pe,
+                     api_calls_json_path: Optional[str]) -> ScanResult:
+        file_path = str(path)
+
+        # 3a. truncation (docs/CODE_REVIEW.md F17): a PE whose headers,
+        # section raw data, or certificate table extend past EOF is cut off.
+        # Its features describe a file that does not exist, so static must not
+        # score it -> ERROR -> NEEDS_REVIEW. Like an invalid PE, this ends the
+        # static path (behavioral is gated on a usable static verdict).
+        truncated = truncation_findings(pe, len(bytez))
+        if truncated:
+            logger.warning("truncated PE %s: %s", file_path, truncated)
+            result.static_verdict = StaticVerdict.ERROR
+            result.reason_codes += ["static_pe_truncated", *truncated]
             final, reasons = decide(result.static_verdict, result.behavioral_verdict,
                                     result.memory_verdict, result.network_verdict)
             result.final_decision, result.reason_codes = final, result.reason_codes + reasons
@@ -229,7 +259,7 @@ class CortexPipeline:
         else:
             # 4-5. static feature extraction + LightGBM
             try:
-                vec, degraded = self.feature_extractor.feature_vector_with_report(bytez)
+                vec, degraded = self.feature_extractor.feature_vector_with_report(bytez, pe=pe)
                 result.degraded_groups = degraded
                 static_score = float(self.static_model.predict_proba(vec.reshape(1, -1))[0])
                 result.static_score = static_score

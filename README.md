@@ -161,7 +161,7 @@ The pipeline has two stages.
 8. Export to ONNX and verify the ONNX output matches the Python model
 
 **Live Detection (runtime)**
-1. Validate the file path (exists, readable, ≤ 100 MiB) and the PE format
+1. Validate the file path (exists, readable, ≤ 100 MiB) and the PE format, and reject truncated PEs (parsed once; the same parse feeds feature extraction)
 2. Check the known-file allowlist (NSRL hash or trusted Authenticode signature)
 3. Extract PE features → Static verdict
 4. Tokenize the API trace → Behavioral verdict
@@ -266,6 +266,16 @@ The **policy engine** checks these rules in order and returns the first match:
 | 5 | Any signal ERROR (file could not be analyzed) | **NEEDS_REVIEW** |
 | 6 | Behavioral requested but PENDING (trace too short), Static ALLOW | **ALLOW_UNVERIFIED** (`behavioral_pending_unverified`; set by `behavioral.pending_with_static_allow`) |
 | 7 | Otherwise | **ALLOW** |
+
+**Truncated PE files** count as "could not be analyzed" (rule 5). Before the Static model scores a file, three structural checks run on the parsed PE. If any fires, Static is ERROR and the decision is **NEEDS_REVIEW**, with reason `static_pe_truncated` plus one detail code per rule:
+
+| Detail code | Fires when |
+|---|---|
+| `pe_truncated:section_raw_beyond_eof:<bytes>` | a section's `PointerToRawData + SizeOfRawData` is past the end of the file (`<bytes>` = largest overrun; zero tolerance) |
+| `pe_truncated:headers_beyond_eof` | `SizeOfHeaders` is larger than the file |
+| `pe_truncated:certificate_table_beyond_eof` | the certificate table (a file offset) ends past the end of the file |
+
+Measurement and rationale: [docs/TECHNICAL_NOTES.md](docs/TECHNICAL_NOTES.md#truncated-pe-files-f17).
 
 > If you retrain a model, its score distribution changes and you must derive its thresholds again.
 
