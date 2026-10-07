@@ -1,0 +1,175 @@
+# python -m scripts.evaluate_all_models   (git a4dcfa9, 2026-10-06T10:45:20Z)
+>>> prevalence projection at malicious base rates: 1 in 1,000, 1 in 10,000, 1 in 100,000  (per-signal only; the
+>>> combined pipeline's ALERT/NEEDS_REVIEW/TERMINATE volume through decide() is
+>>> NOT modelled -- that needs a file-population model this repo does not have.
+==============================================================================
+1. CORTEX-STATIC  (data/models/cortex_static.lgbm)
+   STATIC_ALLOW_MAX = 0.4789517595186417
+   STATIC_BLOCK_MIN = 0.9811748406902472
+------------------------------------------------------------------------------
+ split=val  (source: data/processed/ember2024_train.parquet)
+   3-way confusion (rows = true label, cols = static verdict):
+     true\pred       ALLOW    ALERT    BLOCK          n
+     benign         115804     1125       72     117001
+     malicious        1291     6594   109114     116999
+   binary metrics:
+  @ ALLOW boundary (not-ALLOW=+) TN=115804 FP=1197 FN=1291 TP=115708 | P=0.9898 R=0.9890 F1=0.9894 FPR=0.0102 AUC=0.999283 | n=234000 (117001 benign / 116999 malicious)
+  @ BLOCK boundary (BLOCK=+)   TN=116929 FP=72 FN=7885 TP=109114 | P=0.9993 R=0.9326 F1=0.9648 FPR=0.0006 AUC=0.999283 | n=234000 (117001 benign / 116999 malicious)
+   AUC-ROC (threshold-independent): 0.999283
+   -- deployment-prevalence projection: @ ALLOW boundary (escalate=+) (deployed threshold held fixed) --
+      per-signal positive-verdict rate only; combined pipeline volume not modelled (see header)
+      measured on this split: FPR=0.0102  TPR=0.9890  (117001 benign / 116999 malicious rows)
+      prevalence         PPV   alert%     FP/10k    FP/100k     TP/10k    TP/100k
+      1 in 1,000      0.0882    1.12%       ~102     ~1,022       ~9.9      ~98.9
+      1 in 10,000     0.0096    1.03%       ~102     ~1,023       ~1.0       ~9.9
+      1 in 100,000    0.0010    1.02%       ~102     ~1,023       ~0.1       ~1.0
+   -- deployment-prevalence projection: @ BLOCK boundary (BLOCK=+) (deployed threshold held fixed) --
+      per-signal positive-verdict rate only; combined pipeline volume not modelled (see header)
+      measured on this split: FPR=0.0006  TPR=0.9326  (117001 benign / 116999 malicious rows)
+      prevalence         PPV   alert%     FP/10k    FP/100k     TP/10k    TP/100k
+      1 in 1,000      0.6027    0.15%         ~6        ~61       ~9.3      ~93.3
+      1 in 10,000     0.1316    0.07%         ~6        ~62       ~0.9       ~9.3
+      1 in 100,000    0.0149    0.06%         ~6        ~62       ~0.1       ~0.9
+------------------------------------------------------------------------------
+ split=test  (source: data/processed/ember2024_test.parquet)
+   3-way confusion (rows = true label, cols = static verdict):
+     true\pred       ALLOW    ALERT    BLOCK          n
+     benign         266666     3001      273     269940
+     malicious        4821    18162   247017     270000
+   binary metrics:
+  @ ALLOW boundary (not-ALLOW=+) TN=266666 FP=3274 FN=4821 TP=265179 | P=0.9878 R=0.9821 F1=0.9850 FPR=0.0121 AUC=0.998778 | n=539940 (269940 benign / 270000 malicious)
+  @ BLOCK boundary (BLOCK=+)   TN=269667 FP=273 FN=22983 TP=247017 | P=0.9989 R=0.9149 F1=0.9550 FPR=0.0010 AUC=0.998778 | n=539940 (269940 benign / 270000 malicious)
+   AUC-ROC (threshold-independent): 0.998778
+   -- deployment-prevalence projection: @ ALLOW boundary (escalate=+) (deployed threshold held fixed) --
+      per-signal positive-verdict rate only; combined pipeline volume not modelled (see header)
+      measured on this split: FPR=0.0121  TPR=0.9821  (269940 benign / 270000 malicious rows)
+      prevalence         PPV   alert%     FP/10k    FP/100k     TP/10k    TP/100k
+      1 in 1,000      0.0750    1.31%       ~121     ~1,212       ~9.8      ~98.2
+      1 in 10,000     0.0080    1.22%       ~121     ~1,213       ~1.0       ~9.8
+      1 in 100,000    0.0008    1.21%       ~121     ~1,213       ~0.1       ~1.0
+   -- deployment-prevalence projection: @ BLOCK boundary (BLOCK=+) (deployed threshold held fixed) --
+      per-signal positive-verdict rate only; combined pipeline volume not modelled (see header)
+      measured on this split: FPR=0.0010  TPR=0.9149  (269940 benign / 270000 malicious rows)
+      prevalence         PPV   alert%     FP/10k    FP/100k     TP/10k    TP/100k
+      1 in 1,000      0.4752    0.19%        ~10       ~101       ~9.1      ~91.5
+      1 in 10,000     0.0830    0.11%        ~10       ~101       ~0.9       ~9.1
+      1 in 100,000    0.0090    0.10%        ~10       ~101       ~0.1       ~0.9
+==============================================================================
+2. CORTEX-MEMORY  (data/models/cortex_memory.lgbm)
+   MEMORY_MALICIOUS_MIN = 0.0024964628000000  (verdict capped at ALERT in decide())
+------------------------------------------------------------------------------
+ split=val  (data/processed/memory_val.parquet)
+  @ MEMORY_MALICIOUS_MIN       TN=2906 FP=24 FN=0 TP=3000 | P=0.9921 R=1.0000 F1=0.9960 FPR=0.0082 AUC=0.999999 | n=5930 (2930 benign / 3000 malicious)
+   -- deployment-prevalence projection: @ MEMORY_MALICIOUS_MIN (deployed threshold held fixed) --
+      per-signal positive-verdict rate only; combined pipeline volume not modelled (see header)
+      measured on this split: FPR=0.0082  TPR=1.0000  (2930 benign / 3000 malicious rows)
+      prevalence         PPV   alert%     FP/10k    FP/100k     TP/10k    TP/100k
+      1 in 1,000      0.1089    0.92%        ~82       ~818      ~10.0     ~100.0
+      1 in 10,000     0.0121    0.83%        ~82       ~819       ~1.0      ~10.0
+      1 in 100,000    0.0012    0.82%        ~82       ~819       ~0.1       ~1.0
+------------------------------------------------------------------------------
+ split=test  (data/processed/memory_test.parquet)
+  @ MEMORY_MALICIOUS_MIN       TN=2902 FP=28 FN=1 TP=2999 | P=0.9907 R=0.9997 F1=0.9952 FPR=0.0096 AUC=0.999988 | n=5930 (2930 benign / 3000 malicious)
+   -- deployment-prevalence projection: @ MEMORY_MALICIOUS_MIN (deployed threshold held fixed) --
+      per-signal positive-verdict rate only; combined pipeline volume not modelled (see header)
+      measured on this split: FPR=0.0096  TPR=0.9997  (2930 benign / 3000 malicious rows)
+      prevalence         PPV   alert%     FP/10k    FP/100k     TP/10k    TP/100k
+      1 in 1,000      0.0948    1.05%        ~95       ~955      ~10.0     ~100.0
+      1 in 10,000     0.0104    0.97%        ~96       ~956       ~1.0      ~10.0
+      1 in 100,000    0.0010    0.96%        ~96       ~956       ~0.1       ~1.0
+==============================================================================
+3. CORTEX-NETWORK  (data/models/cortex_network.lgbm)
+   NETWORK_MALICIOUS_MIN = 0.6672636218000000  (verdict capped at ALERT in decide())
+------------------------------------------------------------------------------
+ split=val  (data/processed/network_val.parquet)
+  @ NETWORK_MALICIOUS_MIN      TN=160725 FP=139 FN=1300 TP=49533 | P=0.9972 R=0.9744 F1=0.9857 FPR=0.0009 AUC=0.997084 | n=211697 (160864 benign / 50833 malicious)
+   -- deployment-prevalence projection: @ NETWORK_MALICIOUS_MIN (deployed threshold held fixed) --
+      per-signal positive-verdict rate only; combined pipeline volume not modelled (see header)
+      measured on this split: FPR=0.0009  TPR=0.9744  (160864 benign / 50833 malicious rows)
+      prevalence         PPV   alert%     FP/10k    FP/100k     TP/10k    TP/100k
+      1 in 1,000      0.5303    0.18%         ~9        ~86       ~9.7      ~97.4
+      1 in 10,000     0.1014    0.10%         ~9        ~86       ~1.0       ~9.7
+      1 in 100,000    0.0112    0.09%         ~9        ~86       ~0.1       ~1.0
+------------------------------------------------------------------------------
+ split=test  (data/processed/network_test.parquet)
+  @ NETWORK_MALICIOUS_MIN      TN=160717 FP=152 FN=1307 TP=51041 | P=0.9970 R=0.9750 F1=0.9859 FPR=0.0009 AUC=0.997182 | n=213217 (160869 benign / 52348 malicious)
+   -- deployment-prevalence projection: @ NETWORK_MALICIOUS_MIN (deployed threshold held fixed) --
+      per-signal positive-verdict rate only; combined pipeline volume not modelled (see header)
+      measured on this split: FPR=0.0009  TPR=0.9750  (160869 benign / 52348 malicious rows)
+      prevalence         PPV   alert%     FP/10k    FP/100k     TP/10k    TP/100k
+      1 in 1,000      0.5081    0.19%         ~9        ~94       ~9.8      ~97.5
+      1 in 10,000     0.0935    0.10%         ~9        ~94       ~1.0       ~9.8
+      1 in 100,000    0.0102    0.10%         ~9        ~94       ~0.1       ~1.0
+   -- per-attack-type detection on TEST @ NETWORK_MALICIOUS_MIN (n_train = support in data/processed/network_train.parquet) --
+      aggregate TEST recall at this threshold = 0.9750
+      Benign                      n_test= 160869 n_train=  1126031  FPR=0.0009  (benign -- false positive rate, not detection)
+      Bot                         n_test=   3517 n_train=    24287  detection_rate=0.9991
+      Brute Force -Web            n_test=     64 n_train=      423  detection_rate=0.7656  <-- BELOW aggregate recall by >5pp; matches low train support (423 rows) -- under-trained, not necessarily 'hard'
+      Brute Force -XSS            n_test=     23 n_train=      160  detection_rate=0.9130  <-- BELOW aggregate recall by >5pp; matches low train support (160 rows) -- under-trained, not necessarily 'hard'
+      DDOS attack-HOIC            n_test=   8402 n_train=    58809  detection_rate=1.0000
+      DDOS attack-LOIC-UDP        n_test=    173 n_train=     1211  detection_rate=1.0000
+      DDoS attacks-LOIC-HTTP      n_test=   7056 n_train=    49397  detection_rate=1.0000
+      DoS attacks-GoldenEye       n_test=    508 n_train=     3559  detection_rate=1.0000
+      DoS attacks-Hulk            n_test=   5657 n_train=    39598  detection_rate=1.0000
+      DoS attacks-SlowHTTPTest    n_test=   9105 n_train=        3  detection_rate=1.0000
+      DoS attacks-Slowloris       n_test=   1099 n_train=     7693  detection_rate=1.0000
+      FTP-BruteForce              n_test=  13005 n_train=        2  detection_rate=1.0000
+      Infilteration               n_test=   1433 n_train=    10030  detection_rate=0.1019  <-- BELOW aggregate recall by >5pp
+      SQL Injection               n_test=      8 n_train=       64  detection_rate=1.0000
+      SSH-Bruteforce              n_test=   2298 n_train=     9775  detection_rate=1.0000
+==============================================================================
+4. CORTEX-BEHAVIORAL  (data/models/cortex_behavioral_best.pt)
+   BEHAVIORAL_MALICIOUS_MIN = 0.6000000000000000
+   sequence-length bands (raw api_calls length): too_short <10 | short 10-99 | ok+truncated >=100
+   use_padding_mask = False (from sidecar)
+------------------------------------------------------------------------------
+ split=val  (data/processed/behavioral_val.parquet)   n=918
+  band=too_short  [model-raw; deployment floors this band to PENDING] TN=4 FP=0 FN=3 TP=0 | P=0.0000 R=0.0000 F1=0.0000 FPR=0.0000 AUC=1.000000 | n=7 (4 benign / 3 malicious)
+  band=short                   TN=117 FP=0 FN=17 TP=175 | P=1.0000 R=0.9115 F1=0.9537 FPR=0.0000 AUC=0.983040 | n=309 (117 benign / 192 malicious)
+  band=ok+truncated            TN=15 FP=1 FN=3 TP=583 | P=0.9983 R=0.9949 F1=0.9966 FPR=0.0625 AUC=0.997760 | n=602 (16 benign / 586 malicious)
+   ---
+  TOTAL (deployment: short+ok) TN=132 FP=1 FN=20 TP=758 | P=0.9987 R=0.9743 F1=0.9863 FPR=0.0075 AUC=0.994424 | n=911 (133 benign / 778 malicious)
+  TOTAL (all rows, model-raw)  TN=136 FP=1 FN=23 TP=758 | P=0.9987 R=0.9706 F1=0.9844 FPR=0.0073 AUC=0.994290 | n=918 (137 benign / 781 malicious)
+   -- deployment-prevalence projection: TOTAL (deployment: short+ok) (deployed threshold held fixed) --
+      per-signal positive-verdict rate only; combined pipeline volume not modelled (see header)
+      measured on this split: FPR=0.0075  TPR=0.9743  (133 benign / 778 malicious rows)
+      prevalence         PPV   alert%     FP/10k    FP/100k     TP/10k    TP/100k
+      1 in 1,000      0.1148    0.85%        ~75       ~751       ~9.7      ~97.4
+      1 in 10,000     0.0128    0.76%        ~75       ~752       ~1.0       ~9.7
+      1 in 100,000    0.0013    0.75%        ~75       ~752       ~0.1       ~1.0
+------------------------------------------------------------------------------
+ split=test  (data/processed/behavioral_test.parquet)   n=917
+  band=too_short  [model-raw; deployment floors this band to PENDING] TN=11 FP=0 FN=4 TP=0 | P=0.0000 R=0.0000 F1=0.0000 FPR=0.0000 AUC=0.659091 | n=15 (11 benign / 4 malicious)
+  band=short                   TN=107 FP=0 FN=9 TP=175 | P=1.0000 R=0.9511 F1=0.9749 FPR=0.0000 AUC=0.997054 | n=291 (107 benign / 184 malicious)
+  band=ok+truncated            TN=19 FP=0 FN=2 TP=590 | P=1.0000 R=0.9966 F1=0.9983 FPR=0.0000 AUC=0.999200 | n=611 (19 benign / 592 malicious)
+   ---
+  TOTAL (deployment: short+ok) TN=126 FP=0 FN=11 TP=765 | P=1.0000 R=0.9858 F1=0.9929 FPR=0.0000 AUC=0.998732 | n=902 (126 benign / 776 malicious)
+  TOTAL (all rows, model-raw)  TN=137 FP=0 FN=15 TP=765 | P=1.0000 R=0.9808 F1=0.9903 FPR=0.0000 AUC=0.997324 | n=917 (137 benign / 780 malicious)
+   -- deployment-prevalence projection: TOTAL (deployment: short+ok) (deployed threshold held fixed) --
+      per-signal positive-verdict rate only; combined pipeline volume not modelled (see header)
+      measured on this split: FPR=0.0000  TPR=0.9858  (126 benign / 776 malicious rows)
+      NOTE: 0 false positives on only 126 benign rows -- the PPVs below are an UPPER BOUND,
+      not a point estimate. Rule-of-three 95% CI upper bound on the true FPR is ~0.0238 (2.38%);
+      at that FPR the PPVs collapse like every other signal's.
+      prevalence         PPV   alert%     FP/10k    FP/100k     TP/10k    TP/100k
+      1 in 1,000      1.0000    0.10%         ~0         ~0       ~9.9      ~98.6
+      1 in 10,000     1.0000    0.01%         ~0         ~0       ~1.0       ~9.9
+      1 in 100,000    1.0000    0.00%         ~0         ~0       ~0.1       ~1.0
+==============================================================================
+5. CORTEX-EMULATION  (data/models/cortex_emulation_best.pt)   *** REPORT-ONLY / NOT IN ANY LIVE DECISION PATH ***
+   EMULATION_MALICIOUS_MIN = 0.9993585944175720  (telemetry EmulationVerdict only; never reaches decide())
+   use_padding_mask = False (from sidecar)
+------------------------------------------------------------------------------
+ split=val  (data/processed/emulation_val.parquet)   n=675
+  PENDING (all-padding / empty trace, not scored): 0  (0 benign / 0 malicious)
+  info only: rows with 1-9 API calls: 168  (scored; no rule applies to them)
+  @ EMULATION_MALICIOUS_MIN (deployment: scored rows) TN=440 FP=10 FN=66 TP=159 | P=0.9408 R=0.7067 F1=0.8071 FPR=0.0222 AUC=0.949472 | n=675 (450 benign / 225 malicious)
+  @ EMULATION_MALICIOUS_MIN (all rows, model-raw) TN=440 FP=10 FN=66 TP=159 | P=0.9408 R=0.7067 F1=0.8071 FPR=0.0222 AUC=0.949472 | n=675 (450 benign / 225 malicious)
+------------------------------------------------------------------------------
+ split=test  (data/processed/emulation_test.parquet)   n=2495
+  PENDING (all-padding / empty trace, not scored): 1  (1 benign / 0 malicious)
+  info only: rows with 1-9 API calls: 249  (scored; no rule applies to them)
+  @ EMULATION_MALICIOUS_MIN (deployment: scored rows) TN=1922 FP=13 FN=327 TP=232 | P=0.9469 R=0.4150 F1=0.5771 FPR=0.0067 AUC=0.873724 | n=2494 (1935 benign / 559 malicious)
+  @ EMULATION_MALICIOUS_MIN (all rows, model-raw) TN=1923 FP=13 FN=327 TP=232 | P=0.9469 R=0.4150 F1=0.5771 FPR=0.0067 AUC=0.873724 | n=2495 (1936 benign / 559 malicious)
+==============================================================================
+done. read-only run -- no model / threshold / parquet was written.

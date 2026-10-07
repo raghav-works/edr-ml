@@ -3,6 +3,26 @@
 Running tracker for known-but-deferred work. Blocking review items 1–6 are
 done (see git log); this is what remains.
 
+## Senior code review — Phase 1 status (2026-10-06)
+
+Review findings F1–F30 live in `docs/CODE_REVIEW.md`. Its last section,
+**"Phase 1 status (2026-10-06)"**, is the current tracker for them. It has
+three parts:
+- **Status per finding.** Fixed: F2, F3, F12, F13, F17, F21, F24. Partly fixed:
+  F4, and F11 (flag only, default unchanged). All others are open.
+- **Follow-ups found during Phase 1.**
+  - Fixed in `a4dcfa9`: the emulation checkpoint is now pinned to its
+    pre-masking forward pass, and empty traces are PENDING for both sequence
+    models.
+  - Still open: F23; a re-check of the F17 rules; model metadata files that must
+    ship with the models; and emulation scoring 1–9-call traces.
+- **Decisions waiting on the manager.** The BLOCK path, `ALLOW_UNVERIFIED`, and
+  the alert budget and deployment surface.
+
+Final checks: `pytest` 403 + `pytest -m slow` 14 passed, 0 failed, 0 errors;
+`scripts.evaluate_all_models` matches the records for all five models
+(`reports/phase1_final_eval_2026-10-06.txt`); ONNX parity has 0 flips.
+
 ## PDF review item 9 — `NEEDS_REVIEW` state — DONE
 
 `FinalDecision.NEEDS_REVIEW` now sits between `ALLOW` and `ALERT`. The four

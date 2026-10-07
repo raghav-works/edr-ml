@@ -161,3 +161,95 @@ All runs used the repo's `.venv` (Python 3.10, lightgbm 4.7.0, torch 2.14.0, onn
 - **Behavioral:** `cortex_behavioral_best.pt` + `api_vocab.json` (366 tokens, embed_dim 128) on `behavioral_{val,test}.parquet`. Ran under current `models/behavioral_cnn.py` and under `git show 76c3534^:models/behavioral_cnn.py`. Compared with `cortex_behavioral.onnx` and `_int8.onnx`. Baselines: sklearn `CountVectorizer(binary)` + `LogisticRegression` on the first 100 calls, trained on train, scored on test.
 - **Memory:** single-feature AUCs and a depth-1 `DecisionTreeClassifier` trained on `memory_train`, scored on `memory_test`. Family = second `-` field of `Category`.
 - **Tests:** `pytest -q` → 168 passed, 0 failed, 0 errors (34.7 s).
+
+---
+
+## Phase 1 status (2026-10-06)
+
+Phase 1 is the safety hotfixes on branch `fix/p1-safety-hotfixes`, based on
+`f1d691a`.
+- No model was retrained.
+- No threshold value changed. `config/thresholds.yaml` gained only policy
+  switches and model hash pins.
+- Final checks, all on the final code (`a4dcfa9`):
+  - `pytest`: 403 passed, 0 failed, 0 errors.
+  - `pytest -m slow`: 14 passed, 0 failed, 0 errors.
+  - `scripts.evaluate_all_models`: exit 0, and **all five models match their
+    records.** Static matches `reports/static_retrain_20260921/`; memory,
+    network, behavioral and emulation (model-raw lines) match
+    `EVAL_ALL_MODELS_RESULTS.txt`. The only extra lines are prevalence
+    projections and the emulation PENDING lines. Output:
+    `reports/phase1_final_eval_2026-10-06.txt`.
+  - `scripts.verify_onnx_parity`: 0 verdict flips on static, memory and network.
+
+| Finding | Status | Commit | Note |
+|---|---|---|---|
+| F1 | open | — | Phase 2 (needs a retrain or feature change) |
+| F2 | fixed | `15a67f3` | Not retrained. A JSON sidecar records the forward pass the checkpoint was trained with (`use_padding_mask=false` for the shipped one). `load_behavioral_model()` is the only loader and checks the sha256 of checkpoint and vocab. Val reproduces TN 132 / FP 1 / FN 20 / TP 758. A masked retrain is still to come. The same fix was applied to emulation (`a4dcfa9`, follow-up 1) |
+| F3 | fixed | `45039cb` | Lowercase only, exactly as training. A scored window with more than 10% `<UNK>` gives PENDING (`behavioral_unk_rate_high`). Input-format diagnostics are on ScanResult |
+| F4 | partly fixed | `8987c4f` | TERMINATE needs static ALERT/BLOCK. Without it, ALERT `behavioral_malicious_uncorroborated`. The threshold is still from val+test (F23) |
+| F5–F10 | open | — | |
+| F11 | partly fixed (flag only) | `7b87e3e` | `file_scan.attach_memory_network`, default `true`, so behaviour is unchanged. With `false`, final BLOCK becomes unreachable (static BLOCK is corroborated only by memory/network). Waiting on the BLOCK-path decision |
+| F12 | fixed | `d0153b7`, `45039cb` | A non-finite score or logit gives ERROR for every signal, emulation included |
+| F13 | fixed | `d0153b7` | Behavioral PENDING with static ALLOW gives `ALLOW_UNVERIFIED` (`behavioral.pending_with_static_allow`) |
+| F14–F16 | open | — | |
+| F17 | fixed | `03831e5`, `ef91e08` | Truncation rules R1 (section raw data past EOF, zero tolerance), R2 (headers) and R3 (certificate table) give NEEDS_REVIEW. The PE is parsed once per scan |
+| F18–F20 | open | — | |
+| F21 | fixed | `45039cb` | The pipeline forces `eval()` and scores under `torch.inference_mode()` |
+| F22, F23 | open | — | |
+| F24 | fixed | `b6adfe8` | JSON `.meta.json` replaces pickle. Every load checks the `.lgbm` sha256 against the JSON. Deployed loads also check the `config/thresholds.yaml` `*.model_sha256` pin. Every `torch.load` uses `weights_only=True`. Scores are bit-identical before and after |
+| F25 | open | — | `pefile` is now parsed once per scan (F17), but `signify` still runs twice and latency was not re-measured |
+| F26–F30 | open | — | F27: Phase 1 added tests for every fixed finding (168 → 417 tests), but the gaps it lists for F1, subgroups and time splits remain |
+
+Also on this branch: `fee8b13` makes slow tests opt-in. `pytest -m slow` must
+pass before every commit and in every release check (README §10).
+
+### Follow-ups found during Phase 1
+1. **Emulation checkpoint vs code — fixed in `a4dcfa9`.** This was the same
+   defect as F2.
+   - **Cause.** Commit `b876d26` (2026-09-22) added padding masking to
+     `models/emulation_cnn.py` after the shipped `cortex_emulation_best.pt`
+     (2026-08-27) was trained. The current code gave val 442/8/71/154, and the
+     one empty test trace scored NaN, which crashed `scripts.evaluate_all_models`.
+   - **Fix.** The F2 pattern: a `use_padding_mask` switch, bit-identical to
+     `b876d26^` when `False`; a JSON sidecar (back-filled `false`); and one loader,
+     `load_emulation_model()`. The sidecar code is shared with behavioral in
+     `models/sequence_artifacts.py`, and the behavioral format is unchanged.
+   - **Result.** The recorded val (440 / 10 / 66 / 159, AUC 0.949472) and test
+     (1923 / 13 / 327 / 232, AUC 0.873724) numbers reproduce exactly on the
+     model-raw lines.
+   - **Empty-trace guard, both sequence models.** An all-padding (empty-trace)
+     row is never scored: it counts as PENDING (test has 1 benign row). The
+     scoring helpers refuse such rows, and training drops them. Behavioral has
+     no empty traces in any split, so its numbers are unchanged.
+2. **F23 is unchanged.** The behavioral and emulation thresholds were still
+   chosen on val+test, and behavioral has no calibrator or cal split.
+3. **Re-check the F17 rules on the Phase 2 benign benchmark.** R1–R3 hit 0 of
+   126 local benign PEs. That is a small sample, and R1 has zero tolerance.
+4. **Model files must ship with their metadata.** These are gitignored, like
+   the models; without them the loaders refuse to load.
+   - each `*.lgbm` needs its `*.meta.json`;
+   - `cortex_behavioral_best.pt` needs `cortex_behavioral_best.meta.json`;
+   - `cortex_emulation_best.pt` needs `cortex_emulation_best.meta.json`.
+
+   The old pickle `.meta` files were moved out of the repo (kept, not deleted).
+5. **Emulation scores very short traces; behavioral does not.** Emulation
+   scores traces of 1–9 API calls: 168 of 675 in val and 249 of 2,495 in test.
+   Behavioral sends traces under 10 calls to PENDING. Emulation is report-only,
+   so nothing depends on this today. If emulation is ever wired into decisions,
+   it needs a rule for short traces based on measured evidence, not a copy of
+   behavioral's cutoff.
+
+### Decisions waiting on the manager
+1. **The BLOCK path.** Today a final BLOCK needs static BLOCK plus a memory or
+   network MALICIOUS on the same scan. F11 says those vectors do not describe
+   the file. `file_scan.attach_memory_network` cannot be set to `false` until we
+   decide what a BLOCK should require: none, static alone at a stricter
+   threshold, or static plus behavioral.
+2. **The new `ALLOW_UNVERIFIED` decision state (F13).** Consumers of the
+   security event must handle it. We need to decide whether it should notify
+   anyone, or whether `NEEDS_REVIEW` should be used instead (one config line).
+3. **Alert budget and deployment surface** (§6 questions 1, 4 and 5). Every
+   remaining threshold and FP decision depends on these: on-access or on-demand
+   scanning, what TERMINATE means operationally, and an acceptable false-alert
+   rate per endpoint.
